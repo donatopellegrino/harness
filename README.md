@@ -11,7 +11,7 @@ npm install
 npm start
 ```
 
-Open the printed loopback URL (normally `http://127.0.0.1:43187`) in Chrome. Choose **Continue with ChatGPT** and authorize this app to use your ChatGPT plan. Model choices come from your signed-in account. **Default** effort omits the effort parameter; the model selects its default. Explicit options use catalog metadata where provided, documented GPT-6 settings, or low/medium/high for other models; the API remains authoritative for model support.
+Open the printed loopback URL (normally `http://127.0.0.1:43187`) in Chrome. Choose **Continue with ChatGPT** and authorize this app to use your ChatGPT plan. The picker shows the full account catalog plus GPT-6.1 Sol, GPT-6 Sol, and GPT-6 Luna, which can be usable even when omitted from the catalog. **Custom model…** accepts other model IDs; OpenAI checks access for each request. **Default** effort omits the effort parameter; the model selects its default. Explicit options use catalog metadata where provided, documented GPT-6 settings, or common reasoning levels for custom IDs; the API remains authoritative for model support.
 
 To use another local port: `PORT=0 npm start` chooses an unused port, or `PORT=43210 npm start` selects one. Only `127.0.0.1` is bound.
 

@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { ChatGPTAuth } from './lib/auth.mjs';
 import { Store } from './lib/store.mjs';
-import { normalizeModels, responseText, streamReply } from './lib/responses.mjs';
+import { normalizeModels, resolveModel, responseText, streamReply } from './lib/responses.mjs';
 
 const root = dirname(fileURLToPath(import.meta.url));
 const assets = new Map([
@@ -99,8 +99,8 @@ export async function createHarness({ port = 0, directory = join(root, '.data'),
       if (running.has(chat.id)) throw fail('This chat is already generating a reply.', 409);
       if (!match[2] && request.method === 'PATCH') {
         if (typeof body.model !== 'string' || typeof body.effort !== 'string') throw fail('Choose a model and effort.');
-        const selected = (await models()).find(item => item.id === body.model);
-        if (!selected || (body.effort !== 'default' && !selected.efforts.includes(body.effort))) throw fail('Choose an available model and effort.');
+        const selected = resolveModel(await models(), body.model);
+        if (body.effort !== 'default' && !selected.efforts.includes(body.effort)) throw fail('Choose a supported effort.');
         if (running.has(chat.id)) throw fail('This chat is already generating a reply.', 409);
         chat.model = body.model; chat.effort = body.effort; persist();
         return json(response, view(chat));
@@ -113,8 +113,8 @@ export async function createHarness({ port = 0, directory = join(root, '.data'),
         response.on('close', () => { if (!response.writableEnded) controller.abort(); });
         const emit = event => { if (!response.destroyed) response.write(`${JSON.stringify(event)}\n`); };
         try {
-          const selected = (await models()).find(item => item.id === chat.model);
-          if (!selected || (chat.effort !== 'default' && !selected.efforts.includes(chat.effort))) throw fail('Choose an available model and effort.');
+          const selected = resolveModel(await models(), chat.model);
+          if (chat.effort !== 'default' && !selected.efforts.includes(chat.effort)) throw fail('Choose a supported effort.');
           const token = await auth.accessToken();
           response.writeHead(200, { 'Content-Type': 'application/x-ndjson', 'X-Accel-Buffering': 'no' });
           response.flushHeaders();

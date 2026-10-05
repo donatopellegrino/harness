@@ -3,6 +3,8 @@ import { accountSynchronizer } from '/account-sync.js';
 const $ = id => document.getElementById(id);
 let chats = [], models = [], account = {}, activeId, busy = false;
 const active = () => chats.find(chat => chat.id === activeId);
+const CUSTOM_MODEL = '__custom__';
+const modelID = () => $('model').value === CUSTOM_MODEL ? $('model-id').value.trim() : $('model').value;
 const showError = message => { $('error').textContent = message; $('error').hidden = !message; };
 const safely = handler => async (...args) => { try { showError(''); await handler(...args); } catch (error) { showError(error.message); } };
 async function api(path, method = 'GET', body) {
@@ -17,9 +19,10 @@ function replaceChat(chat) {
 }
 function controls() {
   const connected = account.sharing && models.length > 0;
-  $('send').disabled = busy || !connected || !$('model').value;
+  $('send').disabled = busy || !connected || !modelID();
   $('new-chat').disabled = busy;
   $('model').disabled = busy || !connected;
+  $('model-id').disabled = busy || !connected;
   $('effort').disabled = busy || !connected;
   $('login').disabled = busy;
   $('logout').disabled = busy;
@@ -54,15 +57,21 @@ function renderMessages() {
   $('messages').scrollTop = $('messages').scrollHeight;
 }
 function fillEfforts() {
-  const selected = models.find(model => model.id === $('model').value);
-  const options = ['default', ...(selected?.efforts ?? [])];
+  const selected = models.find(model => model.id === modelID());
+  const options = ['default', ...(selected?.efforts ?? ($('model').value === CUSTOM_MODEL ? ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] : []))];
   $('effort').replaceChildren(...options.map(effort => new Option(effort === 'default' ? 'Default' : effort[0].toUpperCase() + effort.slice(1), effort)));
   $('effort').value = options.includes(active()?.effort) ? active().effort : 'default';
 }
+function selectModel(id) {
+  const custom = Boolean(id) && !models.some(model => model.id === id);
+  $('model').value = custom ? CUSTOM_MODEL : id;
+  $('model-id').hidden = !custom;
+  $('model-id').value = custom ? id : '';
+}
 function render() {
   renderChats(); renderMessages();
-  $('model').replaceChildren(...(models.length ? models.map(model => new Option(model.name, model.id)) : [new Option('Sign in to load models', '')]));
-  if (models.some(model => model.id === active()?.model)) $('model').value = active().model;
+  $('model').replaceChildren(...(models.length ? [...models.map(model => new Option(model.name, model.id)), new Option('Custom model…', CUSTOM_MODEL)] : [new Option('Sign in to load models', '')]));
+  selectModel(models.length ? active()?.model || models[0].id : '');
   fillEfforts(); controls();
 }
 async function refresh() {
@@ -81,14 +90,21 @@ async function newChat() {
   $('prompt').value = ''; render(); $('prompt').focus();
 }
 async function saveSettings() {
-  const model = $('model').value, effort = $('effort').value;
+  const model = modelID(), effort = $('effort').value;
   if (!active()) await newChat();
   const chat = await api(`/api/chats/${activeId}`, 'PATCH', { model, effort });
   replaceChat(chat);
-  $('model').value = model; fillEfforts(); $('effort').value = effort;
+  selectModel(model); fillEfforts(); $('effort').value = effort;
 }
 $('new-chat').onclick = safely(newChat);
-$('model').onchange = safely(async () => { fillEfforts(); await saveSettings(); });
+$('model').onchange = safely(async () => {
+  const custom = $('model').value === CUSTOM_MODEL;
+  $('model-id').hidden = !custom;
+  if (custom) { $('model-id').value = ''; fillEfforts(); controls(); $('model-id').focus(); }
+  else { fillEfforts(); await saveSettings(); }
+});
+$('model-id').oninput = controls;
+$('model-id').onchange = safely(async () => { if (modelID()) { fillEfforts(); await saveSettings(); } });
 $('effort').onchange = safely(saveSettings);
 $('login').onclick = safely(async () => { const { url } = await api('/api/login', 'POST'); window.location.assign(url); });
 $('logout').onclick = safely(async () => {

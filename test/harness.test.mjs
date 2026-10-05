@@ -7,7 +7,7 @@ import { generateKeyPair, exportJWK, createLocalJWKSet, SignJWT } from 'jose';
 import { Store } from '../lib/store.mjs';
 import { ChatGPTAuth } from '../lib/auth.mjs';
 import { createHarness } from '../server.mjs';
-import { streamReply } from '../lib/responses.mjs';
+import { streamReply, normalizeModels, resolveModel } from '../lib/responses.mjs';
 import { accountSynchronizer } from '../public/account-sync.js';
 
 const discovery = {
@@ -208,7 +208,10 @@ test('HTTP chat flow: model/effort, full history, isolation, failed-turn rollbac
   const state = await (await call('/api/state')).text(); assert.equal(state.includes('private-token'), false);
   const account = await (await call('/api/account')).json();
   assert.deepEqual(account, { connected: true, sharing: true, email: 'test@example.com' });
-  assert.equal((await (await call('/api/models')).json()).models.length, 1);
+  const modelList = (await (await call('/api/models')).json()).models;
+  assert.equal(modelList.length, 4);
+  assert.ok(modelList.some(model => model.id === 'gpt-6-sol'));
+  assert.ok(modelList.some(model => model.id === 'gpt-6-luna'));
   const first = await (await call('/api/chats', 'POST')).json();
   const second = await (await call('/api/chats', 'POST')).json();
   await call(`/api/chats/${first.id}`, 'PATCH', { model: 'gpt-6.1-sol', effort: 'high' });
@@ -223,6 +226,10 @@ test('HTTP chat flow: model/effort, full history, isolation, failed-turn rollbac
   await call(`/api/chats/${second.id}/messages`, 'POST', { text: 'Separate' });
   assert.deepEqual(sent[2].input, [{ role: 'user', content: 'Separate' }]);
   assert.equal(sent[2].reasoning, undefined);
+  assert.equal((await call(`/api/chats/${second.id}`, 'PATCH', { model: 'future-chat-model', effort: 'default' })).status, 200);
+  await call(`/api/chats/${second.id}/messages`, 'POST', { text: 'Use an unlisted model' });
+  assert.equal(sent[3].model, 'future-chat-model');
+  assert.equal((await call(`/api/chats/${second.id}`, 'PATCH', { model: '../invalid', effort: 'default' })).status, 400);
   events = (await (await call(`/api/chats/${first.id}/messages`, 'POST', { text: 'fail' })).text()).trim().split('\n').map(JSON.parse);
   assert.equal(events.at(-1).type, 'error');
   const saved = store.read('chats.json');
@@ -234,4 +241,18 @@ test('HTTP chat flow: model/effort, full history, isolation, failed-turn rollbac
   const restored = await (await fetch(restarted.origin + '/api/state', { headers: { Cookie: newCookie } })).json();
   assert.equal(restored.chats.find(chat => chat.id === first.id).effort, 'high');
   assert.equal(restored.chats.find(chat => chat.id === first.id).messages.length, 4);
+});
+
+test('model picker retains the whole catalog, supplements missing GPT-6 models, and permits custom IDs', () => {
+  const catalog = normalizeModels({ models: [
+    { slug: 'gpt-6-astra', display_name: 'Astra', visibility: 'list', supported_reasoning_levels: [{ effort: 'low' }, { effort: 'ultra' }] },
+    { slug: 'gpt-5.5', visibility: 'hide' },
+    { slug: 'gpt-6-sol', supported_reasoning_efforts: ['low', 'high'] },
+    { slug: 'gpt-6-sol' },
+  ] });
+  assert.deepEqual(catalog.map(model => model.id), ['gpt-6-astra', 'gpt-5.5', 'gpt-6-sol', 'gpt-6.1-sol', 'gpt-6-luna']);
+  assert.deepEqual(resolveModel(catalog, 'gpt-6-astra').efforts, ['low', 'ultra']);
+  assert.deepEqual(resolveModel(catalog, 'gpt-6-sol').efforts, ['low', 'high']);
+  assert.equal(resolveModel(catalog, 'future-model').id, 'future-model');
+  assert.throws(() => resolveModel(catalog, ''), /valid model ID/);
 });

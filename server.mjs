@@ -10,6 +10,7 @@ import { normalizeModels, responseText, streamReply } from './lib/responses.mjs'
 const root = dirname(fileURLToPath(import.meta.url));
 const assets = new Map([
   ['/', ['index.html', 'text/html']], ['/app.js', ['app.js', 'text/javascript']], ['/style.css', ['style.css', 'text/css']],
+  ['/account-sync.js', ['account-sync.js', 'text/javascript']],
 ]);
 const fail = (message, status = 400) => Object.assign(new Error(message), { status });
 const json = (response, value, status = 200) => {
@@ -73,6 +74,7 @@ export async function createHarness({ port = 0, directory = join(root, '.data'),
       if (request.method !== 'GET' && request.headers.origin !== origin) throw fail('A same-origin request is required.', 403);
 
       if (url.pathname === '/api/state' && request.method === 'GET') return json(response, { auth: auth.status(), chats: chats.map(view) });
+      if (url.pathname === '/api/account' && request.method === 'GET') return json(response, auth.status());
       if (url.pathname === '/api/models' && request.method === 'GET') return json(response, { models: await models() });
       if (url.pathname === '/api/login' && request.method === 'POST') {
         if (running.size) throw fail('Wait for the reply to finish first.', 409);

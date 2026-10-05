@@ -8,6 +8,7 @@ import { Store } from '../lib/store.mjs';
 import { ChatGPTAuth } from '../lib/auth.mjs';
 import { createHarness } from '../server.mjs';
 import { streamReply } from '../lib/responses.mjs';
+import { accountSynchronizer } from '../public/account-sync.js';
 
 const discovery = {
   issuer: 'https://auth.openai.com', authorization_endpoint: 'https://auth.openai.com/api/accounts/authorize',
@@ -127,6 +128,61 @@ test('requires response.completed; distinguishes incomplete and failed streams',
   await assert.rejects(streamReply({ ...common, fetcher: async () => sse([{ type: 'response.output_text.delta', delta: 'partial' }]) }), /before the reply completed/);
   await assert.rejects(streamReply({ ...common, fetcher: async () => sse([{ type: 'response.incomplete' }]) }), /incomplete/);
   await assert.rejects(streamReply({ ...common, fetcher: async () => sse([{ type: 'response.failed', response: { error: { message: 'Usage limit' } } }]) }), /Usage limit/);
+  await assert.rejects(streamReply({ ...common, fetcher: async () => sse([{ type: 'response.completed', response: { status: 'completed', output: [] } }]) }), /without a message/);
+});
+
+test('streamed output items survive a completion event with an empty output array', async () => {
+  const expected = output('Harness is working.');
+  const result = await streamReply({
+    token: 'test', model: 'test', effort: 'default', input: [], onDelta() {},
+    fetcher: async () => sse([
+      { type: 'response.output_text.delta', delta: 'Harness is working.' },
+      ...expected.map((item, output_index) => ({ type: 'response.output_item.done', output_index, item })),
+      { type: 'response.completed', response: { status: 'completed', output: [] } },
+    ]),
+  });
+  assert.deepEqual(result, expected);
+});
+
+test('a page opened before OAuth completion picks up the new account without a reload', async () => {
+  let current = { connected: false, sharing: false, email: null };
+  let backend = { ...current }, refreshes = 0;
+  const sync = accountSynchronizer({
+    readStatus: async () => backend, currentStatus: () => current,
+    onChange: async () => { refreshes++; current = { ...backend }; },
+  });
+  await sync(); assert.equal(refreshes, 0);
+  backend = { connected: true, sharing: true, email: 'test@example.com' };
+  await sync();
+  assert.deepEqual(current, backend);
+  assert.equal(refreshes, 1);
+  await sync(); assert.equal(refreshes, 1);
+  backend = { connected: false, sharing: false, email: 'test@example.com' };
+  await sync(); assert.equal(refreshes, 2);
+});
+
+test('account checks do not overwrite a streaming chat or run concurrently', async () => {
+  let busy = true, reads = 0, refreshes = 0, resolve;
+  const sync = accountSynchronizer({
+    readStatus: () => { reads++; return new Promise(done => { resolve = done; }); },
+    currentStatus: () => ({ connected: false }),
+    onChange: async () => { refreshes++; }, canSync: () => !busy,
+  });
+  await sync(); assert.equal(reads, 0);
+  busy = false; const pending = sync();
+  await sync(); assert.equal(reads, 1);
+  busy = true; resolve({ connected: true, sharing: true }); await pending;
+  assert.equal(refreshes, 0);
+});
+
+test('a transient account read failure allows the next check to recover', async () => {
+  let reads = 0, refreshes = 0;
+  const sync = accountSynchronizer({
+    readStatus: async () => { if (++reads === 1) throw new Error('Offline'); return { connected: true, sharing: true }; },
+    currentStatus: () => ({ connected: false }), onChange: async () => { refreshes++; },
+  });
+  await assert.rejects(sync(), /Offline/);
+  await sync(); assert.equal(refreshes, 1);
 });
 
 test('HTTP chat flow: model/effort, full history, isolation, failed-turn rollback and restart', async t => {
@@ -150,6 +206,8 @@ test('HTTP chat flow: model/effort, full history, isolation, failed-turn rollbac
   assert.equal((await fetch(app.origin + '/api/state')).status, 403);
   assert.equal((await call('/api/chats', 'POST', undefined, { Origin: 'https://evil.example' })).status, 403);
   const state = await (await call('/api/state')).text(); assert.equal(state.includes('private-token'), false);
+  const account = await (await call('/api/account')).json();
+  assert.deepEqual(account, { connected: true, sharing: true, email: 'test@example.com' });
   assert.equal((await (await call('/api/models')).json()).models.length, 1);
   const first = await (await call('/api/chats', 'POST')).json();
   const second = await (await call('/api/chats', 'POST')).json();

@@ -1,3 +1,5 @@
+import { accountSynchronizer } from '/account-sync.js';
+
 const $ = id => document.getElementById(id);
 let chats = [], models = [], account = {}, activeId, busy = false;
 const active = () => chats.find(chat => chat.id === activeId);
@@ -131,3 +133,16 @@ await safely(refresh)();
 const login = new URLSearchParams(window.location.search).get('login');
 if (login && login !== 'success') showError(login);
 if (login) history.replaceState(null, '', '/');
+
+const syncAccount = accountSynchronizer({
+  readStatus: () => api('/api/account'),
+  currentStatus: () => account,
+  onChange: refresh,
+  canSync: () => !busy && !document.hidden,
+});
+// Background checks are read-only. Transient network errors leave the current UI
+// intact and are retried on the next check; user-initiated actions show errors.
+const checkAccount = () => { void syncAccount().catch(() => {}); };
+setInterval(checkAccount, 3000);
+window.addEventListener('focus', checkAccount);
+document.addEventListener('visibilitychange', checkAccount);

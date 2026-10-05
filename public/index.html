@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Basic Harness</title>
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <aside>
+    <div class="brand">Basic Harness</div>
+    <button id="new-chat">+ New chat</button>
+    <nav id="chats" aria-label="Chats"></nav>
+    <div class="account">
+      <p id="account-status">Not connected</p>
+      <button id="login">Continue with ChatGPT</button>
+      <button id="logout" hidden>Sign out</button>
+      <a href="https://chatgpt.com/#settings/Usage" target="_blank" rel="noopener noreferrer">Manage usage ↗</a>
+    </div>
+  </aside>
+  <main>
+    <header>
+      <label>Model <select id="model" disabled><option value="">Sign in to load models</option></select></label>
+      <label>Effort <select id="effort" disabled><option value="default">Default</option></select></label>
+    </header>
+    <p id="error" role="alert" hidden></p>
+    <section id="messages" aria-label="Conversation" aria-live="polite"></section>
+    <form id="composer">
+      <textarea id="prompt" rows="3" maxlength="32000" placeholder="Message…" aria-label="Message"></textarea>
+      <button id="send" type="submit" disabled>Send</button>
+    </form>
+    <p class="hint">Enter to send · Shift + Enter for a new line</p>
+  </main>
+</body>
+</html>

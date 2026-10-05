@@ -1,0 +1,9 @@
+{
+  "name": "basic-harness",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": { "start": "node server.mjs", "test": "node --test", "check": "node --check server.mjs && node --check lib/auth.mjs && node --check lib/responses.mjs && node --check public/app.js" },
+  "dependencies": { "jose": "^6.1.0" }
+}

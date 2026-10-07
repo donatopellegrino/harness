@@ -24,6 +24,7 @@
       <label>Model <select id="model" disabled><option value="">Sign in to load models</option></select></label>
       <input id="model-id" placeholder="Model ID, e.g. gpt-6-sol" aria-label="Model ID" maxlength="128" hidden>
       <label>Effort <select id="effort" disabled><option value="default">Default</option></select></label>
+      <button id="speed" type="button" aria-pressed="false" title="Request faster processing without changing reasoning effort. Uses more of your plan allowance; availability and speed depend on the model." disabled>⚡ Fast</button>
     </header>
     <p id="error" role="alert" hidden></p>
     <section id="messages" aria-label="Conversation" aria-live="polite"></section>

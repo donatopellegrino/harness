@@ -15,6 +15,10 @@ Open the printed loopback URL (normally `http://127.0.0.1:43187`) in Chrome. Cho
 
 To use another local port: `PORT=0 npm start` chooses an unused port, or `PORT=43210 npm start` selects one. Only `127.0.0.1` is bound.
 
+The **⚡ Fast** button toggles Fast mode for the current chat and remembers that choice. It keeps the chosen reasoning effort and sends `service_tier: "priority"` (the Fast mode alias accepted by the ChatGPT plan endpoint) when on, or `"default"` when off. Existing and new chats start with Fast mode off. Speed and access depend on the model and account. Fast mode consumes more plan allowance; see [OpenAI's speed guide](https://learn.chatgpt.com/docs/agent-configuration/speed). Provider errors remain visible so you can turn it off and retry.
+
+If OpenAI reports Standard processing despite a Fast request, the completed reply is saved and the page displays a notice. Requesting Fast mode does not guarantee that OpenAI will serve that tier.
+
 Chats, selections, host identity, and credentials persist in the ignored `.data/` folder. Credentials stay in the Node process and protected local files (directory mode `0700`, files `0600`); they are never returned to browser code. Chat text is rendered as plain text.
 
 ## How it works

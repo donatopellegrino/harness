@@ -30,6 +30,7 @@ select { max-width: 290px; color: #292925; }
 #composer { display: flex; gap: 12px; align-items: flex-end; width: min(100%, 760px); margin: 0 auto; border: 1px solid #d9d9d2; border-radius: 12px; padding: 12px; }
 textarea { resize: vertical; width: 100%; max-height: 180px; min-height: 60px; border: 0; background: transparent; line-height: 1.5; padding: 4px; color: inherit; }
 #send { background: #292925; color: #fff; border-color: #292925; }
+#speed[aria-pressed="true"] { background: #fff3c4; border-color: #c8a442; color: #715300; }
 .hint { text-align: center; font-size: 11px; color: #85857c; margin: 10px 0 0; }
 #error { background: #fff0ed; color: #9b3020; border-radius: 7px; padding: 12px; font-size: 13px; line-height: 1.5; }
 [hidden] { display: none !important; }

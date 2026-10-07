@@ -196,7 +196,7 @@ test('HTTP chat flow: model/effort, full history, isolation, failed-turn rollbac
     assert.equal(options.headers.Authorization, 'Bearer private-token');
     const body = JSON.parse(options.body); sent.push(body);
     if (body.input.at(-1).content === 'fail') return sse([{ type: 'response.failed', response: { error: { message: 'Usage limit reached' } } }]);
-    return sse([{ type: 'response.output_text.delta', delta: 'Hello 🐱' }, { type: 'response.completed', response: { status: 'completed', output: output('Hello 🐱') } }]);
+    return sse([{ type: 'response.output_text.delta', delta: 'Hello 🐱' }, { type: 'response.completed', response: { status: 'completed', service_tier: 'default', output: output('Hello 🐱') } }]);
   };
   const app = await createHarness({ directory: store.directory, auth, fetcher });
   t.after(() => { app.server.close(); app.server.closeAllConnections(); });
@@ -214,18 +214,25 @@ test('HTTP chat flow: model/effort, full history, isolation, failed-turn rollbac
   assert.ok(modelList.some(model => model.id === 'gpt-6-luna'));
   const first = await (await call('/api/chats', 'POST')).json();
   const second = await (await call('/api/chats', 'POST')).json();
-  await call(`/api/chats/${first.id}`, 'PATCH', { model: 'gpt-6.1-sol', effort: 'high' });
+  assert.equal(first.fast, false);
+  assert.equal((await call(`/api/chats/${first.id}`, 'PATCH', { model: 'gpt-6.1-sol', effort: 'high', fast: 'true' })).status, 400);
+  await call(`/api/chats/${first.id}`, 'PATCH', { model: 'gpt-6.1-sol', effort: 'high', fast: true });
   let events = (await (await call(`/api/chats/${first.id}/messages`, 'POST', { text: 'Hi' })).text()).trim().split('\n').map(JSON.parse);
   assert.equal(events[0].text, 'Hello 🐱'); assert.equal(events.at(-1).type, 'done');
+  assert.match(events.find(event => event.type === 'notice').message, /OpenAI used Standard/);
   await call(`/api/chats/${first.id}/messages`, 'POST', { text: 'Follow up' });
   assert.deepEqual(sent[1].input.slice(1, 3), output('Hello 🐱'));
   assert.equal(sent[1].reasoning.effort, 'high');
+  assert.equal(sent[0].service_tier, 'priority');
+  assert.equal(sent[1].service_tier, 'priority');
   assert.equal(sent[1].store, false); assert.equal(sent[1].stream, true);
   assert.equal(sent[1].previous_response_id, undefined); assert.equal(sent[1].tools, undefined);
   await call(`/api/chats/${second.id}`, 'PATCH', { model: 'gpt-6.1-sol', effort: 'default' });
-  await call(`/api/chats/${second.id}/messages`, 'POST', { text: 'Separate' });
+  const standardEvents = await (await call(`/api/chats/${second.id}/messages`, 'POST', { text: 'Separate' })).text();
+  assert.equal(standardEvents.includes('"type":"notice"'), false);
   assert.deepEqual(sent[2].input, [{ role: 'user', content: 'Separate' }]);
   assert.equal(sent[2].reasoning, undefined);
+  assert.equal(sent[2].service_tier, 'default');
   assert.equal((await call(`/api/chats/${second.id}`, 'PATCH', { model: 'future-chat-model', effort: 'default' })).status, 200);
   await call(`/api/chats/${second.id}/messages`, 'POST', { text: 'Use an unlisted model' });
   assert.equal(sent[3].model, 'future-chat-model');
@@ -240,7 +247,23 @@ test('HTTP chat flow: model/effort, full history, isolation, failed-turn rollbac
   const newCookie = (await fetch(restarted.origin)).headers.get('set-cookie').split(';')[0];
   const restored = await (await fetch(restarted.origin + '/api/state', { headers: { Cookie: newCookie } })).json();
   assert.equal(restored.chats.find(chat => chat.id === first.id).effort, 'high');
+  assert.equal(restored.chats.find(chat => chat.id === first.id).fast, true);
   assert.equal(restored.chats.find(chat => chat.id === first.id).messages.length, 4);
+  const setting = await (await call(`/api/chats/${first.id}`, 'PATCH', { model: 'gpt-6.1-sol', effort: 'high', fast: false })).json();
+  assert.equal(setting.fast, false);
+  await call(`/api/chats/${first.id}/messages`, 'POST', { text: 'Standard again' });
+  assert.equal(sent.at(-1).service_tier, 'default');
+  assert.equal(sent.at(-1).reasoning.effort, 'high');
+});
+
+test('existing chats without a speed setting use Standard mode', async t => {
+  const store = tempStore(t);
+  store.write('chats.json', [{ id: 'legacy', title: 'Old chat', model: 'gpt-6-luna', effort: 'high', messages: [], input: [] }]);
+  const app = await createHarness({ directory: store.directory, auth: { status: () => ({ connected: false }) } });
+  t.after(() => { app.server.close(); app.server.closeAllConnections(); });
+  const cookie = (await fetch(app.origin)).headers.get('set-cookie').split(';')[0];
+  const state = await (await fetch(app.origin + '/api/state', { headers: { cookie } })).json();
+  assert.equal(state.chats[0].fast, false);
 });
 
 test('model picker retains the whole catalog, supplements missing GPT-6 models, and permits custom IDs', () => {

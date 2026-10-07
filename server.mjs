@@ -17,7 +17,7 @@ const json = (response, value, status = 200) => {
   response.writeHead(status, { 'Content-Type': 'application/json' });
   response.end(JSON.stringify(value));
 };
-const view = chat => ({ id: chat.id, title: chat.title, model: chat.model, effort: chat.effort, messages: chat.messages });
+const view = chat => ({ id: chat.id, title: chat.title, model: chat.model, effort: chat.effort, fast: chat.fast === true, messages: chat.messages });
 
 async function readJSON(request) {
   if (request.headers['content-type']?.split(';')[0] !== 'application/json') throw fail('Expected JSON.', 415);
@@ -86,7 +86,7 @@ export async function createHarness({ port = 0, directory = join(root, '.data'),
         return json(response, result);
       }
       if (url.pathname === '/api/chats' && request.method === 'POST') {
-        const chat = { id: randomUUID(), title: 'New chat', model: '', effort: 'default', messages: [], input: [] };
+        const chat = { id: randomUUID(), title: 'New chat', model: '', effort: 'default', fast: false, messages: [], input: [] };
         chats.unshift(chat); persist(); return json(response, view(chat), 201);
       }
       const match = url.pathname.match(/^\/api\/chats\/([\w-]+)(\/messages)?$/);
@@ -99,10 +99,13 @@ export async function createHarness({ port = 0, directory = join(root, '.data'),
       if (running.has(chat.id)) throw fail('This chat is already generating a reply.', 409);
       if (!match[2] && request.method === 'PATCH') {
         if (typeof body.model !== 'string' || typeof body.effort !== 'string') throw fail('Choose a model and effort.');
+        if (body.fast !== undefined && typeof body.fast !== 'boolean') throw fail('Fast mode must be on or off.');
         const selected = resolveModel(await models(), body.model);
         if (body.effort !== 'default' && !selected.efforts.includes(body.effort)) throw fail('Choose a supported effort.');
         if (running.has(chat.id)) throw fail('This chat is already generating a reply.', 409);
-        chat.model = body.model; chat.effort = body.effort; persist();
+        chat.model = body.model; chat.effort = body.effort;
+        if (body.fast !== undefined) chat.fast = body.fast;
+        persist();
         return json(response, view(chat));
       }
       if (match[2] && request.method === 'POST') {
@@ -119,7 +122,13 @@ export async function createHarness({ port = 0, directory = join(root, '.data'),
           response.writeHead(200, { 'Content-Type': 'application/x-ndjson', 'X-Accel-Buffering': 'no' });
           response.flushHeaders();
           const user = { role: 'user', content: body.text.trim() };
-          const output = await streamReply({ fetcher, token, model: chat.model, effort: chat.effort, input: [...chat.input, user], signal: controller.signal, onDelta: text => emit({ type: 'delta', text }) });
+          const output = await streamReply({
+            fetcher, token, model: chat.model, effort: chat.effort, fast: chat.fast === true,
+            input: [...chat.input, user], signal: controller.signal, onDelta: text => emit({ type: 'delta', text }),
+            onServiceTier: tier => {
+              if (chat.fast === true && tier === 'default') emit({ type: 'notice', message: 'Fast mode was requested, but OpenAI used Standard processing for this reply.' });
+            },
+          });
           if (controller.signal.aborted) return;
           const text = responseText(output);
           chat.input.push(user, ...output); // Replay full output, including opaque reasoning, on the next request.

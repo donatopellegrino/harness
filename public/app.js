@@ -24,6 +24,7 @@ function controls() {
   $('model').disabled = busy || !connected;
   $('model-id').disabled = busy || !connected;
   $('effort').disabled = busy || !connected;
+  $('speed').disabled = busy || !connected;
   $('login').disabled = busy;
   $('logout').disabled = busy;
   $('prompt').disabled = busy;
@@ -73,6 +74,7 @@ function render() {
   $('model').replaceChildren(...(models.length ? [...models.map(model => new Option(model.name, model.id)), new Option('Custom model…', CUSTOM_MODEL)] : [new Option('Sign in to load models', '')]));
   selectModel(models.length ? active()?.model || models[0].id : '');
   fillEfforts(); controls();
+  $('speed').setAttribute('aria-pressed', String(active()?.fast === true));
 }
 async function refresh() {
   const state = await api('/api/state'); chats = state.chats; account = state.auth;
@@ -90,11 +92,12 @@ async function newChat() {
   $('prompt').value = ''; render(); $('prompt').focus();
 }
 async function saveSettings() {
-  const model = modelID(), effort = $('effort').value;
+  const model = modelID(), effort = $('effort').value, fast = $('speed').getAttribute('aria-pressed') === 'true';
   if (!active()) await newChat();
-  const chat = await api(`/api/chats/${activeId}`, 'PATCH', { model, effort });
+  const chat = await api(`/api/chats/${activeId}`, 'PATCH', { model, effort, fast });
   replaceChat(chat);
   selectModel(model); fillEfforts(); $('effort').value = effort;
+  $('speed').setAttribute('aria-pressed', String(chat.fast));
 }
 $('new-chat').onclick = safely(newChat);
 $('model').onchange = safely(async () => {
@@ -106,6 +109,12 @@ $('model').onchange = safely(async () => {
 $('model-id').oninput = controls;
 $('model-id').onchange = safely(async () => { if (modelID()) { fillEfforts(); await saveSettings(); } });
 $('effort').onchange = safely(saveSettings);
+$('speed').onclick = safely(async () => {
+  const wasFast = $('speed').getAttribute('aria-pressed') === 'true';
+  $('speed').setAttribute('aria-pressed', String(!wasFast));
+  try { await saveSettings(); }
+  catch (error) { $('speed').setAttribute('aria-pressed', String(wasFast)); throw error; }
+});
 $('login').onclick = safely(async () => { const { url } = await api('/api/login', 'POST'); window.location.assign(url); });
 $('logout').onclick = safely(async () => {
   const result = await api('/api/logout', 'POST'); await refresh();
@@ -132,6 +141,7 @@ $('composer').onsubmit = safely(async event => {
         const item = JSON.parse(buffer.slice(0, newline)); buffer = buffer.slice(newline + 1);
         if (item.type === 'delta') { received += item.text; reply.textContent = received; $('messages').scrollTop = $('messages').scrollHeight; }
         if (item.type === 'error') throw new Error(item.message);
+        if (item.type === 'notice') showError(item.message);
         if (item.type === 'done') { replaceChat(item.chat); done = true; }
       }
     }

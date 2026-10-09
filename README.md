@@ -27,7 +27,11 @@ Chats, selections, host identity, and credentials persist in the ignored `.data/
 
 The Node server implements the documented Sign in with ChatGPT flow directly: dynamic client registration, authorization code with PKCE, state and nonce validation, signed OIDC identity validation using `jose`, serialized token refresh, and session revocation. It does not read an existing Codex login. It verifies the granted `chatgpt.tokens.use.direct` scope before inference.
 
-Requests use the public Responses API with `store: false` and `stream: true`. Each chat replays its own input history, including encrypted reasoning items. A turn is saved only after `response.completed`; failed or interrupted streams leave the saved chat untouched. No tools are exposed to the model.
+Requests use the public Responses API with `store: false` and `stream: true`. Each chat replays its own input history, including encrypted reasoning items. A conversation turn is saved only after `response.completed`. No tools are exposed to the model.
+
+In `.data/chats.json`, each new assistant message has a `metadata` object containing the request settings (without duplicate input history), local start/finish timestamps, HTTP status and response headers, the unmodified API response object, and every parsed stream event. This preserves model, reasoning effort, service tier, usage, IDs, provider timestamps, annotations, null values, and unknown future fields. Requested settings and reported values are kept separately. Authorization and cookie headers are excluded; request credentials are never archived. Stream events can make this file substantially larger than the visible chat text.
+
+Failed, incomplete, interrupted, or cancelled requests retain their available metadata and error in the chat's `failedAttempts` array, without adding a conversation turn or changing the input history. Metadata survives restarts but is not included in ordinary browser chat payloads or replayed as model input. The GUI still displays only chat text. Older messages retain their existing data; metadata discarded before this change cannot be recovered.
 
 ```sh
 npm run check

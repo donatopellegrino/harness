@@ -17,7 +17,8 @@ const json = (response, value, status = 200) => {
   response.writeHead(status, { 'Content-Type': 'application/json' });
   response.end(JSON.stringify(value));
 };
-const view = chat => ({ id: chat.id, title: chat.title, model: chat.model, effort: chat.effort, fast: chat.fast === true, messages: chat.messages });
+// Keep the ordinary UI payload small; full metadata stays in protected storage.
+const view = chat => ({ id: chat.id, title: chat.title, model: chat.model, effort: chat.effort, fast: chat.fast === true, messages: chat.messages.map(({ role, text }) => ({ role, text })) });
 
 async function readJSON(request) {
   if (request.headers['content-type']?.split(';')[0] !== 'application/json') throw fail('Expected JSON.', 415);
@@ -115,27 +116,35 @@ export async function createHarness({ port = 0, directory = join(root, '.data'),
         const controller = new AbortController();
         response.on('close', () => { if (!response.writableEnded) controller.abort(); });
         const emit = event => { if (!response.destroyed) response.write(`${JSON.stringify(event)}\n`); };
+        const user = { role: 'user', content: body.text.trim() };
+        let metadata;
+        const saveFailedAttempt = error => {
+          if (!metadata) return;
+          (chat.failedAttempts ??= []).push({ text: user.content, error, metadata });
+          persist();
+        };
         try {
           const selected = resolveModel(await models(), chat.model);
           if (chat.effort !== 'default' && !selected.efforts.includes(chat.effort)) throw fail('Choose a supported effort.');
           const token = await auth.accessToken();
           response.writeHead(200, { 'Content-Type': 'application/x-ndjson', 'X-Accel-Buffering': 'no' });
           response.flushHeaders();
-          const user = { role: 'user', content: body.text.trim() };
           const output = await streamReply({
             fetcher, token, model: chat.model, effort: chat.effort, fast: chat.fast === true,
             input: [...chat.input, user], signal: controller.signal, onDelta: text => emit({ type: 'delta', text }),
             onServiceTier: tier => {
               if (chat.fast === true && tier === 'default') emit({ type: 'notice', message: 'Fast mode was requested, but OpenAI used Standard processing for this reply.' });
             },
+            onMetadata: value => { metadata = value; },
           });
-          if (controller.signal.aborted) return;
+          if (controller.signal.aborted) { saveFailedAttempt('Reply was cancelled.'); return; }
           const text = responseText(output);
           chat.input.push(user, ...output); // Replay full output, including opaque reasoning, on the next request.
-          chat.messages.push({ role: 'user', text: user.content }, { role: 'assistant', text });
+          chat.messages.push({ role: 'user', text: user.content }, { role: 'assistant', text, metadata });
           if (chat.messages.length === 2) chat.title = user.content.replace(/\s+/g, ' ').slice(0, 60);
           persist(); emit({ type: 'done', chat: view(chat) }); response.end();
         } catch (error) {
+          saveFailedAttempt(error.message);
           if (response.headersSent) { emit({ type: 'error', message: error.message }); response.end(); }
           else throw error;
         } finally { running.delete(chat.id); }

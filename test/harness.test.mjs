@@ -110,13 +110,13 @@ test('concurrent token refresh is serialized and logout revokes the replacement'
   assert.equal(f.store.read('auth.json').client_id, 'oaiapp_test');
 });
 
-function sse(events) {
+function sse(events, headers = {}) {
   const bytes = new TextEncoder().encode(events.map(event => `data: ${JSON.stringify(event)}\r\n\r\n`).join(''));
   // Deliberately split UTF-8 and SSE delimiters into tiny chunks.
   return new Response(new ReadableStream({ start(controller) {
     for (let i = 0; i < bytes.length; i += 7) controller.enqueue(bytes.slice(i, i + 7));
     controller.close();
-  } }), { headers: { 'Content-Type': 'text/event-stream' } });
+  } }), { headers: { 'Content-Type': 'text/event-stream', ...headers } });
 }
 const output = text => [
   { type: 'reasoning', id: 'rs_test', summary: [], encrypted_content: 'opaque' },
@@ -133,15 +133,47 @@ test('requires response.completed; distinguishes incomplete and failed streams',
 
 test('streamed output items survive a completion event with an empty output array', async () => {
   const expected = output('Harness is working.');
+  let metadata;
+  const completed = { id: 'resp_test', status: 'completed', model: 'test', output: [], reasoning: { effort: null }, future_field: { nested: [1, null] } };
+  const events = [
+    { type: 'response.output_text.delta', delta: 'Harness is working.' },
+    ...expected.map((item, output_index) => ({ type: 'response.output_item.done', output_index, item })),
+    { type: 'response.completed', response: completed },
+  ];
   const result = await streamReply({
     token: 'test', model: 'test', effort: 'default', input: [], onDelta() {},
-    fetcher: async () => sse([
-      { type: 'response.output_text.delta', delta: 'Harness is working.' },
-      ...expected.map((item, output_index) => ({ type: 'response.output_item.done', output_index, item })),
-      { type: 'response.completed', response: { status: 'completed', output: [] } },
-    ]),
+    onMetadata: value => { metadata = value; },
+    fetcher: async () => sse(events),
   });
   assert.deepEqual(result, expected);
+  assert.deepEqual(metadata.response, completed); // Do not replace the raw empty output envelope.
+  assert.deepEqual(metadata.events, events); // Completed item metadata remains available separately.
+  assert.equal(metadata.request.reasoning, undefined);
+  assert.equal(metadata.request.input, undefined);
+});
+
+test('archives HTTP failures, incomplete streams, interrupted streams and transport errors', async () => {
+  const common = { token: 'secret-test-token', model: 'test', effort: 'default', input: [], onDelta() {} };
+  const incomplete = { id: 'resp_partial', status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' }, usage: { output_tokens: 100 } };
+  const scenarios = [
+    { fetcher: async () => Response.json({ error: { code: 'rate_limit', message: 'Try later' } }, { status: 429, headers: { 'x-request-id': 'req_error', 'set-cookie': 'secret-cookie' } }), match: /Try later/, check: data => {
+      assert.equal(data.http.status, 429);
+      assert.equal(data.http.headers['x-request-id'], 'req_error');
+      assert.equal(data.http.headers['set-cookie'], undefined);
+      assert.equal(JSON.parse(data.http.body).error.code, 'rate_limit');
+    } },
+    { fetcher: async () => sse([{ type: 'response.incomplete', response: incomplete }]), match: /incomplete/, check: data => assert.deepEqual(data.response, incomplete) },
+    { fetcher: async () => sse([{ type: 'response.output_text.delta', delta: 'partial' }]), match: /before the reply completed/, check: data => assert.equal(data.events[0].delta, 'partial') },
+    { fetcher: async () => { throw new TypeError('Network offline'); }, match: /Network offline/, check: data => assert.equal(data.http, null) },
+  ];
+  for (const scenario of scenarios) {
+    let metadata;
+    await assert.rejects(streamReply({ ...common, fetcher: scenario.fetcher, onMetadata: value => { metadata = value; } }), scenario.match);
+    scenario.check(metadata);
+    assert.match(metadata.error.message, scenario.match);
+    assert.ok(Date.parse(metadata.finished_at) >= Date.parse(metadata.started_at));
+    assert.equal(JSON.stringify(metadata).includes('secret-test-token'), false);
+  }
 });
 
 test('a page opened before OAuth completion picks up the new account without a reload', async () => {
@@ -195,8 +227,13 @@ test('HTTP chat flow: model/effort, full history, isolation, failed-turn rollbac
     ] });
     assert.equal(options.headers.Authorization, 'Bearer private-token');
     const body = JSON.parse(options.body); sent.push(body);
-    if (body.input.at(-1).content === 'fail') return sse([{ type: 'response.failed', response: { error: { message: 'Usage limit reached' } } }]);
-    return sse([{ type: 'response.output_text.delta', delta: 'Hello 🐱' }, { type: 'response.completed', response: { status: 'completed', service_tier: 'default', output: output('Hello 🐱') } }]);
+    if (body.input.at(-1).content === 'fail') return sse([{ type: 'response.failed', response: { id: 'resp_failed', status: 'failed', error: { code: 'usage_limit', message: 'Usage limit reached' } } }]);
+    return sse([{ type: 'response.output_text.delta', delta: 'Hello 🐱' }, { type: 'response.completed', response: {
+      id: 'resp_metadata', object: 'response', created_at: 1234, completed_at: 1235,
+      status: 'completed', model: body.model, reasoning: { effort: 'medium', summary: null }, service_tier: 'default',
+      usage: { input_tokens: 10, input_tokens_details: { cached_tokens: 4 }, output_tokens: 20, output_tokens_details: { reasoning_tokens: 12 }, total_tokens: 30 },
+      metadata: { label: 'provider-value' }, future_field: { nested: [null, 'preserve'] }, error: null, output: output('Hello 🐱'),
+    } }], { 'x-request-id': 'req_metadata', 'openai-processing-ms': '123', 'set-cookie': 'secret-cookie', authorization: 'secret-header' });
   };
   const app = await createHarness({ directory: store.directory, auth, fetcher });
   t.after(() => { app.server.close(); app.server.closeAllConnections(); });
@@ -240,20 +277,91 @@ test('HTTP chat flow: model/effort, full history, isolation, failed-turn rollbac
   events = (await (await call(`/api/chats/${first.id}/messages`, 'POST', { text: 'fail' })).text()).trim().split('\n').map(JSON.parse);
   assert.equal(events.at(-1).type, 'error');
   const saved = store.read('chats.json');
-  assert.equal(saved.find(chat => chat.id === first.id).messages.length, 4);
-  assert.equal(saved.find(chat => chat.id === first.id).input.at(-1).type, 'message');
-  const restarted = await createHarness({ directory: store.directory, auth, fetcher });
-  t.after(() => { restarted.server.close(); restarted.server.closeAllConnections(); });
-  const newCookie = (await fetch(restarted.origin)).headers.get('set-cookie').split(';')[0];
-  const restored = await (await fetch(restarted.origin + '/api/state', { headers: { Cookie: newCookie } })).json();
-  assert.equal(restored.chats.find(chat => chat.id === first.id).effort, 'high');
-  assert.equal(restored.chats.find(chat => chat.id === first.id).fast, true);
-  assert.equal(restored.chats.find(chat => chat.id === first.id).messages.length, 4);
+  const savedFirst = saved.find(chat => chat.id === first.id);
+  assert.equal(savedFirst.messages.length, 4);
+  assert.equal(savedFirst.input.at(-1).type, 'message');
+  const metadata = savedFirst.messages[1].metadata;
+  assert.equal(metadata.request.reasoning.effort, 'high');
+  assert.equal(metadata.request.service_tier, 'priority');
+  assert.equal(metadata.response.reasoning.effort, 'medium');
+  assert.equal(metadata.response.service_tier, 'default');
+  assert.equal(metadata.response.usage.output_tokens_details.reasoning_tokens, 12);
+  assert.deepEqual(metadata.response.future_field, { nested: [null, 'preserve'] });
+  assert.equal(metadata.response.error, null);
+  assert.equal(metadata.response.completed_at, 1235);
+  assert.equal(metadata.http.headers['x-request-id'], 'req_metadata');
+  assert.equal(metadata.http.headers['openai-processing-ms'], '123');
+  assert.equal(metadata.events.at(-1).response.id, 'resp_metadata');
+  assert.equal(savedFirst.failedAttempts.length, 1);
+  assert.equal(savedFirst.failedAttempts[0].metadata.response.error.code, 'usage_limit');
+  assert.equal(statSync(join(store.directory, 'chats.json')).mode & 0o777, 0o600);
+  const serialized = JSON.stringify(saved);
+  for (const secret of ['private-token', 'secret-cookie', 'secret-header']) assert.equal(serialized.includes(secret), false);
+  // Metadata is archived locally, not sent back as model input or ordinary UI state.
+  assert.equal(sent[1].input.some(item => item.metadata), false);
+  assert.equal(JSON.stringify(events.at(-1)).includes('req_metadata'), false);
   const setting = await (await call(`/api/chats/${first.id}`, 'PATCH', { model: 'gpt-6.1-sol', effort: 'high', fast: false })).json();
   assert.equal(setting.fast, false);
   await call(`/api/chats/${first.id}/messages`, 'POST', { text: 'Standard again' });
   assert.equal(sent.at(-1).service_tier, 'default');
   assert.equal(sent.at(-1).reasoning.effort, 'high');
+  app.server.closeAllConnections();
+  await new Promise(resolve => app.server.close(resolve));
+  const restarted = await createHarness({ directory: store.directory, auth, fetcher });
+  t.after(() => { restarted.server.close(); restarted.server.closeAllConnections(); });
+  const newCookie = (await fetch(restarted.origin)).headers.get('set-cookie').split(';')[0];
+  const restored = await (await fetch(restarted.origin + '/api/state', { headers: { Cookie: newCookie } })).json();
+  assert.equal(restored.chats.find(chat => chat.id === first.id).effort, 'high');
+  assert.equal(restored.chats.find(chat => chat.id === first.id).fast, false);
+  assert.equal(restored.chats.find(chat => chat.id === first.id).messages.length, 6);
+  assert.equal(restored.chats.find(chat => chat.id === first.id).messages[1].metadata, undefined);
+  await fetch(`${restarted.origin}/api/chats/${first.id}/messages`, {
+    method: 'POST', headers: { Cookie: newCookie, Origin: restarted.origin, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text: 'Continue after restart' }),
+  }).then(response => response.text());
+  const afterRestart = store.read('chats.json').find(chat => chat.id === first.id);
+  assert.deepEqual(afterRestart.messages[1].metadata, metadata);
+  assert.equal(afterRestart.messages.at(-1).metadata.response.id, 'resp_metadata');
+  assert.equal(afterRestart.failedAttempts[0].metadata.response.id, 'resp_failed');
+  assert.deepEqual(sent.at(-1).input.slice(1, 3), output('Hello 🐱'));
+});
+
+test('client cancellation archives received metadata without committing a partial turn', async t => {
+  const store = tempStore(t);
+  store.write('chats.json', [{ id: 'cancel-test', title: 'New chat', model: 'test', effort: 'default', messages: [], input: [] }]);
+  const auth = { status: () => ({ connected: true, sharing: true }), accessToken: async () => 'secret' };
+  const app = await createHarness({ directory: store.directory, auth, fetcher: async (url, options) => {
+    if (url.endsWith('/models')) return Response.json({ models: [{ slug: 'test' }] });
+    return new Response(new ReadableStream({ start(controller) {
+      const events = [{ type: 'response.created', response: { id: 'resp_cancel', status: 'in_progress', future_field: 'keep' } }, { type: 'response.output_text.delta', delta: 'partial' }];
+      controller.enqueue(new TextEncoder().encode(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join('')));
+      options.signal.addEventListener('abort', () => controller.error(new DOMException('Cancelled', 'AbortError')), { once: true });
+    } }), { headers: { 'x-request-id': 'req_cancel' } });
+  } });
+  t.after(() => { app.server.close(); app.server.closeAllConnections(); });
+  const cookie = (await fetch(app.origin)).headers.get('set-cookie').split(';')[0];
+  const abort = new AbortController();
+  const response = await fetch(`${app.origin}/api/chats/cancel-test/messages`, {
+    method: 'POST', signal: abort.signal,
+    headers: { Cookie: cookie, Origin: app.origin, 'Content-Type': 'application/json' }, body: JSON.stringify({ text: 'Cancel this' }),
+  });
+  await response.body.getReader().read();
+  abort.abort();
+  // Wait only for this local server's close/abort handler to persist the record.
+  let saved;
+  for (let i = 0; i < 100; i++) {
+    saved = store.read('chats.json')[0];
+    if (saved.failedAttempts?.length) break;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  assert.deepEqual(saved.messages, []);
+  assert.deepEqual(saved.input, []);
+  const metadata = saved.failedAttempts[0].metadata;
+  assert.equal(metadata.response.id, 'resp_cancel');
+  assert.equal(metadata.response.future_field, 'keep');
+  assert.equal(metadata.http.headers['x-request-id'], 'req_cancel');
+  assert.equal(metadata.error.name, 'AbortError');
+  assert.equal(metadata.events.at(-1).delta, 'partial');
 });
 
 test('existing chats without a speed setting use Standard mode', async t => {

@@ -19,6 +19,8 @@ The **⚡ Fast** button toggles Fast mode for the current chat and remembers tha
 
 If OpenAI reports Standard processing despite a Fast request, the completed reply is saved and the page displays a notice. Requesting Fast mode does not guarantee that OpenAI will serve that tier.
 
+Beside **Send**, hold **Effort ↑**, drag onto an effort in the menu above it, and release to send using that effort. Releasing outside the choices cancels. The menu uses the selected model's effort options; the chosen effort becomes the chat's current setting. With a keyboard, activate **Effort ↑**, use the arrow keys, and press Enter to send (Escape cancels).
+
 Chats, selections, host identity, and credentials persist in the ignored `.data/` folder. Credentials stay in the Node process and protected local files (directory mode `0700`, files `0600`); they are never returned to browser code. Chat text is rendered as plain text.
 
 ## How it works

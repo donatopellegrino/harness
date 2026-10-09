@@ -30,6 +30,10 @@
     <section id="messages" aria-label="Conversation" aria-live="polite"></section>
     <form id="composer">
       <textarea id="prompt" rows="3" maxlength="32000" placeholder="Message…" aria-label="Message"></textarea>
+      <div class="effort-send">
+        <div id="send-efforts" role="menu" aria-label="Send with effort" hidden></div>
+        <button id="send-effort" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="send-efforts" title="Hold, drag to an effort above, and release to send" disabled>Effort ↑</button>
+      </div>
       <button id="send" type="submit" disabled>Send</button>
     </form>
     <p class="hint">Enter to send · Shift + Enter for a new line</p>

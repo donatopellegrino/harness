@@ -2,6 +2,7 @@ import { accountSynchronizer } from '/account-sync.js';
 
 const $ = id => document.getElementById(id);
 let chats = [], models = [], account = {}, activeId, busy = false;
+let effortPointer = null;
 const active = () => chats.find(chat => chat.id === activeId);
 const CUSTOM_MODEL = '__custom__';
 const modelID = () => $('model').value === CUSTOM_MODEL ? $('model-id').value.trim() : $('model').value;
@@ -20,6 +21,8 @@ function replaceChat(chat) {
 function controls() {
   const connected = account.sharing && models.length > 0;
   $('send').disabled = busy || !connected || !modelID();
+  $('send-effort').disabled = $('send').disabled || !$('prompt').value.trim();
+  if ($('send-effort').disabled) closeEffortMenu();
   $('new-chat').disabled = busy;
   $('model').disabled = busy || !connected;
   $('model-id').disabled = busy || !connected;
@@ -58,6 +61,7 @@ function renderMessages() {
   $('messages').scrollTop = $('messages').scrollHeight;
 }
 function fillEfforts() {
+  closeEffortMenu();
   const selected = models.find(model => model.id === modelID());
   const options = ['default', ...(selected?.efforts ?? ($('model').value === CUSTOM_MODEL ? ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] : []))];
   $('effort').replaceChildren(...options.map(effort => new Option(effort === 'default' ? 'Default' : effort[0].toUpperCase() + effort.slice(1), effort)));
@@ -120,6 +124,81 @@ $('logout').onclick = safely(async () => {
   const result = await api('/api/logout', 'POST'); await refresh();
   if (!result.revoked) showError('Signed out locally. Remote revocation was not confirmed; disconnect Basic Harness in ChatGPT settings.');
 });
+
+function closeEffortMenu() {
+  const pointer = effortPointer; effortPointer = null;
+  if (pointer !== null && $('send-effort').hasPointerCapture(pointer)) $('send-effort').releasePointerCapture(pointer);
+  $('send-efforts').hidden = true;
+  $('send-effort').setAttribute('aria-expanded', 'false');
+}
+function sendWithEffort(effort) {
+  closeEffortMenu();
+  if ($('send-effort').disabled || ![...$('effort').options].some(option => option.value === effort)) return;
+  $('effort').value = effort;
+  $('composer').requestSubmit();
+}
+function openEffortMenu() {
+  if ($('send-effort').disabled) return;
+  $('send-efforts').replaceChildren(...[...$('effort').options].map(option => {
+    const button = document.createElement('button');
+    button.type = 'button'; button.textContent = option.textContent;
+    button.dataset.effort = option.value; button.setAttribute('role', 'menuitemradio');
+    button.setAttribute('aria-checked', String(option.value === $('effort').value));
+    button.onclick = () => sendWithEffort(option.value);
+    return button;
+  }));
+  $('send-efforts').hidden = false;
+  $('send-effort').setAttribute('aria-expanded', 'true');
+}
+function effortAt(event) {
+  const button = document.elementFromPoint(event.clientX, event.clientY)?.closest('[data-effort]');
+  return button && $('send-efforts').contains(button) ? button : null;
+}
+$('send-effort').addEventListener('pointerdown', event => {
+  if (!event.isPrimary || event.button !== 0 || $('send-effort').disabled) return;
+  event.preventDefault();
+  openEffortMenu(); effortPointer = event.pointerId;
+  $('send-effort').setPointerCapture(event.pointerId);
+});
+$('send-effort').addEventListener('pointermove', event => {
+  if (event.pointerId !== effortPointer) return;
+  const hovered = effortAt(event);
+  for (const button of $('send-efforts').children) button.dataset.highlighted = String(button === hovered);
+});
+$('send-effort').addEventListener('pointerup', event => {
+  if (event.pointerId !== effortPointer) return;
+  event.preventDefault();
+  const effort = effortAt(event)?.dataset.effort;
+  closeEffortMenu();
+  if (effort !== undefined) sendWithEffort(effort);
+});
+$('send-effort').addEventListener('pointercancel', closeEffortMenu);
+$('send-effort').addEventListener('lostpointercapture', () => { if (effortPointer !== null) closeEffortMenu(); });
+// Keyboard activation opens a focusable menu; pointer release handles dragging.
+$('send-effort').onclick = event => {
+  if (event.detail !== 0) return;
+  if (!$('send-efforts').hidden) { closeEffortMenu(); return; }
+  openEffortMenu();
+  [...$('send-efforts').children].find(button => button.dataset.effort === $('effort').value)?.focus();
+};
+$('send-efforts').addEventListener('keydown', event => {
+  const buttons = [...$('send-efforts').children];
+  const index = buttons.indexOf(document.activeElement);
+  if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+    event.preventDefault(); buttons[(index + (event.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length]?.focus();
+  }
+});
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && !$('send-efforts').hidden) {
+    event.preventDefault(); closeEffortMenu(); $('send-effort').focus();
+  }
+});
+document.addEventListener('pointerdown', event => {
+  if (effortPointer === null && !event.target.closest('.effort-send')) closeEffortMenu();
+});
+window.addEventListener('blur', closeEffortMenu);
+document.addEventListener('visibilitychange', () => { if (document.hidden) closeEffortMenu(); });
+$('prompt').addEventListener('input', controls);
 $('composer').onsubmit = safely(async event => {
   event.preventDefault();
   const text = $('prompt').value.trim(); if (!text || busy || !account.sharing) return;

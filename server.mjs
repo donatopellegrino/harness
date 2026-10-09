@@ -11,6 +11,7 @@ const root = dirname(fileURLToPath(import.meta.url));
 const assets = new Map([
   ['/', ['index.html', 'text/html']], ['/app.js', ['app.js', 'text/javascript']], ['/style.css', ['style.css', 'text/css']],
   ['/account-sync.js', ['account-sync.js', 'text/javascript']],
+  ['/theme.js', ['theme.js', 'text/javascript']],
 ]);
 const fail = (message, status = 400) => Object.assign(new Error(message), { status });
 const json = (response, value, status = 200) => {

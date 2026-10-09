@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Basic Harness</title>
+  <script src="/theme.js"></script>
   <link rel="stylesheet" href="/style.css">
   <script type="module" src="/app.js"></script>
 </head>
@@ -12,6 +13,13 @@
     <div class="brand">Basic Harness</div>
     <button id="new-chat">+ New chat</button>
     <nav id="chats" aria-label="Chats"></nav>
+    <label class="appearance">Appearance
+      <select id="theme">
+        <option value="system">System</option>
+        <option value="light">Light</option>
+        <option value="dark">Dark</option>
+      </select>
+    </label>
     <div class="account">
       <p id="account-status">Not connected</p>
       <button id="login">Continue with ChatGPT</button>

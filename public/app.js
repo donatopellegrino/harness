@@ -151,8 +151,14 @@ function openEffortMenu() {
   $('send-effort').setAttribute('aria-expanded', 'true');
 }
 function effortAt(event) {
-  const button = document.elementFromPoint(event.clientX, event.clientY)?.closest('[data-effort]');
-  return button && $('send-efforts').contains(button) ? button : null;
+  const menu = $('send-efforts');
+  if (menu.hidden) return null;
+  const bounds = menu.getBoundingClientRect();
+  if (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom) return null;
+  // Use the full menu width, including its padding, rather than the hit element.
+  // Top/bottom padding belongs to the first/last row respectively.
+  const buttons = [...menu.children];
+  return buttons.find(button => event.clientY < button.getBoundingClientRect().bottom) ?? buttons.at(-1) ?? null;
 }
 $('send-effort').addEventListener('pointerdown', event => {
   if (!event.isPrimary || event.button !== 0 || $('send-effort').disabled) return;

@@ -33,6 +33,35 @@ function controls() {
   $('prompt').disabled = busy;
   $('send').textContent = busy ? 'Replying…' : 'Send';
   for (const button of $('chats').children) button.disabled = busy;
+  renderContext();
+}
+function renderContext() {
+  const selected = models.find(model => model.id === modelID());
+  const limit = selected?.contextWindow;
+  const usage = active()?.contextUsage;
+  const number = value => value?.toLocaleString('en-US') ?? 'unavailable';
+  const total = usage?.totalTokens ?? (usage?.inputTokens != null && usage?.outputTokens != null ? usage.inputTokens + usage.outputTokens : null);
+  const sameModel = usage?.model === modelID();
+  const percent = limit && total != null && sameModel ? total / limit * 100 : null;
+  const percentText = percent > 0 && percent < .1 ? '<0.1%' : `${percent?.toFixed(1)}%`;
+  const capacity = limit ? `${number(limit)} tokens` : 'limit unavailable';
+  $('context-label').textContent = percent != null
+    ? `Context: ${number(total)} / ${capacity} · ${percentText} after last reply`
+    : `Context: ${capacity}${total != null ? ` · Last reply: ${number(total)} tokens` : ''}`;
+  $('context-meter').hidden = percent == null;
+  if (percent != null) $('context-meter').value = Math.min(percent, 100);
+  const breakdown = [];
+  if (usage) {
+    breakdown.push(`Last reply (${usage.model ?? 'unknown model'}): ${number(usage.inputTokens)} input + ${number(usage.outputTokens)} output tokens.`);
+    if (usage.cachedTokens != null) breakdown.push(`${number(usage.cachedTokens)} input tokens were cached.`);
+    if (usage.reasoningTokens != null) breakdown.push(`${number(usage.reasoningTokens)} reasoning tokens are included in the output count.`);
+  } else breakdown.push(active()?.messages.length ? 'Token usage was not recorded for the latest reply.' : 'Token usage will appear after a completed reply.');
+  $('context-breakdown').textContent = breakdown.join(' ');
+  const notes = [limit ? 'Window size comes from your account model catalog.' : 'The account catalog does not provide a window size for this model.'];
+  if (selected?.maxContextWindow && selected.maxContextWindow !== limit) notes.push(`The catalog separately advertises a maximum of ${number(selected.maxContextWindow)} tokens; it is not used for this meter.`);
+  if (usage) notes.push('Counts are from the last completed reply and exclude your draft; the next request can differ.');
+  if (usage && !sameModel) notes.push('The last reply used a different or unknown model, so its usage is not compared with this window.');
+  $('context-note').textContent = notes.join(' ');
 }
 function renderChats() {
   $('chats').replaceChildren(...chats.map(chat => {
@@ -102,6 +131,7 @@ async function saveSettings() {
   replaceChat(chat);
   selectModel(model); fillEfforts(); $('effort').value = effort;
   $('speed').setAttribute('aria-pressed', String(chat.fast));
+  renderContext();
 }
 $('new-chat').onclick = safely(newChat);
 $('model').onchange = safely(async () => {

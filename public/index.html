@@ -44,6 +44,12 @@
       </div>
       <button id="send" type="submit" disabled>Send</button>
     </form>
+    <details id="context">
+      <summary><span id="context-label">Context: limit unavailable</span></summary>
+      <progress id="context-meter" max="100" aria-label="Last reply tokens as a percentage of the catalog context window" hidden></progress>
+      <p id="context-breakdown"></p>
+      <p id="context-note"></p>
+    </details>
     <p class="hint">Enter to send · Shift + Enter for a new line</p>
   </main>
 </body>

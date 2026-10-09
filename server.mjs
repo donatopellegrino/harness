@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { ChatGPTAuth } from './lib/auth.mjs';
 import { Store } from './lib/store.mjs';
-import { normalizeModels, resolveModel, responseText, streamReply } from './lib/responses.mjs';
+import { normalizeModels, resolveModel, responseText, streamReply, latestUsage } from './lib/responses.mjs';
 
 const root = dirname(fileURLToPath(import.meta.url));
 const assets = new Map([
@@ -19,7 +19,8 @@ const json = (response, value, status = 200) => {
   response.end(JSON.stringify(value));
 };
 // Keep the ordinary UI payload small; full metadata stays in protected storage.
-const view = chat => ({ id: chat.id, title: chat.title, model: chat.model, effort: chat.effort, fast: chat.fast === true, messages: chat.messages.map(({ role, text }) => ({ role, text })) });
+const view = chat => ({ id: chat.id, title: chat.title, model: chat.model, effort: chat.effort, fast: chat.fast === true,
+  contextUsage: latestUsage(chat.messages), messages: chat.messages.map(({ role, text }) => ({ role, text })) });
 
 async function readJSON(request) {
   if (request.headers['content-type']?.split(';')[0] !== 'application/json') throw fail('Expected JSON.', 415);

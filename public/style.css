@@ -58,6 +58,14 @@ textarea { resize: vertical; width: 100%; min-width: 0; max-height: 180px; min-h
 #send-efforts button[data-highlighted="true"], #send-efforts button:focus { background: var(--accent); color: var(--accent-text); outline: none; }
 #speed[aria-pressed="true"] { background: var(--fast-bg); border-color: var(--fast-border); color: var(--fast-text); }
 .hint { text-align: center; font-size: 11px; color: var(--dim); margin: 10px 0 0; }
+#context { width: min(100%, 760px); max-height: min(35dvh, 280px); overflow: auto; flex-shrink: 0; margin: 10px auto 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+#context summary { cursor: pointer; overflow-wrap: anywhere; }
+#context summary:focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; border-radius: 3px; }
+#context p { margin: 8px 0 0; }
+#context-meter { display: block; width: 100%; height: 5px; margin-top: 10px; border: 0; border-radius: 3px; overflow: hidden; appearance: none; background: var(--border); accent-color: var(--accent); }
+#context-meter::-webkit-progress-bar { background: var(--border); }
+#context-meter::-webkit-progress-value { background: var(--accent); }
+#context-meter::-moz-progress-bar { background: var(--accent); }
 #error { background: var(--error-bg); color: var(--error-text); border-radius: 7px; padding: 12px; font-size: 13px; line-height: 1.5; }
 [hidden] { display: none !important; }
 @media (max-width: 700px) { aside { width: 170px; padding: 18px 10px; } main { padding: 0 14px 10px; } header { gap: 10px; } label { flex-wrap: wrap; } select { max-width: 170px; } .brand { font-size: 14px; } .account { font-size: 11px; } }

@@ -7,7 +7,7 @@ import { generateKeyPair, exportJWK, createLocalJWKSet, SignJWT } from 'jose';
 import { Store } from '../lib/store.mjs';
 import { ChatGPTAuth } from '../lib/auth.mjs';
 import { createHarness } from '../server.mjs';
-import { streamReply, normalizeModels, resolveModel } from '../lib/responses.mjs';
+import { streamReply, normalizeModels, resolveModel, latestUsage } from '../lib/responses.mjs';
 import { accountSynchronizer } from '../public/account-sync.js';
 
 const discovery = {
@@ -256,6 +256,9 @@ test('HTTP chat flow: model/effort, full history, isolation, failed-turn rollbac
   await call(`/api/chats/${first.id}`, 'PATCH', { model: 'gpt-6.1-sol', effort: 'high', fast: true });
   let events = (await (await call(`/api/chats/${first.id}/messages`, 'POST', { text: 'Hi' })).text()).trim().split('\n').map(JSON.parse);
   assert.equal(events[0].text, 'Hello 🐱'); assert.equal(events.at(-1).type, 'done');
+  assert.deepEqual(events.at(-1).chat.contextUsage, {
+    model: 'gpt-6.1-sol', inputTokens: 10, outputTokens: 20, totalTokens: 30, cachedTokens: 4, reasoningTokens: 12,
+  });
   assert.match(events.find(event => event.type === 'notice').message, /OpenAI used Standard/);
   await call(`/api/chats/${first.id}/messages`, 'POST', { text: 'Follow up' });
   assert.deepEqual(sent[1].input.slice(1, 3), output('Hello 🐱'));
@@ -315,6 +318,7 @@ test('HTTP chat flow: model/effort, full history, isolation, failed-turn rollbac
   assert.equal(restored.chats.find(chat => chat.id === first.id).fast, false);
   assert.equal(restored.chats.find(chat => chat.id === first.id).messages.length, 6);
   assert.equal(restored.chats.find(chat => chat.id === first.id).messages[1].metadata, undefined);
+  assert.equal(restored.chats.find(chat => chat.id === first.id).contextUsage.totalTokens, 30);
   await fetch(`${restarted.origin}/api/chats/${first.id}/messages`, {
     method: 'POST', headers: { Cookie: newCookie, Origin: restarted.origin, 'Content-Type': 'application/json' },
     body: JSON.stringify({ text: 'Continue after restart' }),
@@ -386,4 +390,37 @@ test('model picker retains the whole catalog, supplements missing GPT-6 models, 
   assert.deepEqual(resolveModel(catalog, 'gpt-6-sol').efforts, ['low', 'high']);
   assert.equal(resolveModel(catalog, 'future-model').id, 'future-model');
   assert.throws(() => resolveModel(catalog, ''), /valid model ID/);
+});
+
+test('context limits use account catalog values and never substitute the larger maximum', () => {
+  const catalog = normalizeModels({ models: [
+    { slug: 'gpt-6.1-sol', context_window: 272000, max_context_window: 872000 },
+    { slug: 'unknown', context_window: '128000', max_context_window: 0 },
+    { slug: 'bad', context_window: -1, max_context_window: Number.MAX_SAFE_INTEGER + 1 },
+  ] });
+  assert.equal(resolveModel(catalog, 'gpt-6.1-sol').contextWindow, 272000);
+  assert.equal(resolveModel(catalog, 'gpt-6.1-sol').maxContextWindow, 872000);
+  for (const id of ['unknown', 'bad', 'custom', 'gpt-6-luna']) {
+    assert.equal(resolveModel(catalog, id).contextWindow, null);
+    assert.equal(resolveModel(catalog, id).maxContextWindow, null);
+  }
+});
+
+test('usage summaries preserve recorded counts without exposing metadata or reusing an older reply', () => {
+  const message = { role: 'assistant', text: 'Reply', metadata: {
+    request: { model: 'requested-model' },
+    response: { model: 'reported-model', usage: { input_tokens: 20000, output_tokens: 10000, total_tokens: 30000,
+      input_tokens_details: { cached_tokens: 15000 }, output_tokens_details: { reasoning_tokens: 5000 }, private_field: 'not-for-ui' } },
+    http: { headers: { 'x-request-id': 'private-id' } },
+  } };
+  assert.deepEqual(latestUsage([message]), {
+    model: 'reported-model', inputTokens: 20000, outputTokens: 10000, totalTokens: 30000, cachedTokens: 15000, reasoningTokens: 5000,
+  });
+  assert.equal(latestUsage([message, { role: 'assistant', text: 'Legacy reply' }]), null);
+  assert.equal(latestUsage([]), null);
+  delete message.metadata.response.model;
+  message.metadata.response.usage = { input_tokens: 0, output_tokens: -1, total_tokens: '25' };
+  assert.deepEqual(latestUsage([message]), {
+    model: 'requested-model', inputTokens: 0, outputTokens: null, totalTokens: null, cachedTokens: null, reasoningTokens: null,
+  });
 });

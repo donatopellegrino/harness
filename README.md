@@ -25,6 +25,8 @@ Chats, selections, host identity, and credentials persist in the ignored `.data/
 
 The sidebar's **Appearance** menu offers **Light**, **Dark**, and **System**. System is the initial setting and follows changes to your device's color scheme automatically. Your selection is saved in this browser for this app address and shared between its open tabs. Appearance remains available during replies and while signed out.
 
+Below the composer, **Context** shows the selected model's window from the account catalog and the last completed reply's total tokens and percentage. Expand it for input, output, cached input, and reasoning counts. Reasoning is already included in output; it is not counted twice. The catalog's separate maximum is listed only in the details and is not treated as the current window. These are historical API usage counts, not a live token count: draft text is excluded and the next request's count may differ. Switching models hides the percentage until usage matches the selected model. Missing catalog limits or unrecorded usage are shown as unavailable rather than estimated.
+
 ## How it works
 
 The Node server implements the documented Sign in with ChatGPT flow directly: dynamic client registration, authorization code with PKCE, state and nonce validation, signed OIDC identity validation using `jose`, serialized token refresh, and session revocation. It does not read an existing Codex login. It verifies the granted `chatgpt.tokens.use.direct` scope before inference.
@@ -33,7 +35,7 @@ Requests use the public Responses API with `store: false` and `stream: true`. Ea
 
 In `.data/chats.json`, each new assistant message has a `metadata` object containing the request settings (without duplicate input history), local start/finish timestamps, HTTP status and response headers, the unmodified API response object, and every parsed stream event. This preserves model, reasoning effort, service tier, usage, IDs, provider timestamps, annotations, null values, and unknown future fields. Requested settings and reported values are kept separately. Authorization and cookie headers are excluded; request credentials are never archived. Stream events can make this file substantially larger than the visible chat text.
 
-Failed, incomplete, interrupted, or cancelled requests retain their available metadata and error in the chat's `failedAttempts` array, without adding a conversation turn or changing the input history. Metadata survives restarts but is not included in ordinary browser chat payloads or replayed as model input. The GUI still displays only chat text. Older messages retain their existing data; metadata discarded before this change cannot be recovered.
+Failed, incomplete, interrupted, or cancelled requests retain their available metadata and error in the chat's `failedAttempts` array, without adding a conversation turn or changing the input history. Metadata survives restarts but is not included in ordinary browser chat payloads or replayed as model input. Only a small numeric usage summary is returned for the Context indicator. Older messages retain their existing data; metadata discarded before this change cannot be recovered.
 
 ```sh
 npm run check

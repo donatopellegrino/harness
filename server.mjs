@@ -22,14 +22,16 @@ const json = (response, value, status = 200) => {
 const view = chat => ({ id: chat.id, title: chat.title, model: chat.model, effort: chat.effort, fast: chat.fast === true,
   contextUsage: latestUsage(chat.messages), messages: chat.messages.map(({ role, text }) => ({ role, text })) });
 
-async function readJSON(request) {
+export async function readJSON(request) {
   if (request.headers['content-type']?.split(';')[0] !== 'application/json') throw fail('Expected JSON.', 415);
-  let data = '';
+  const chunks = [];
+  let size = 0;
   for await (const chunk of request) {
-    data += chunk;
-    if (Buffer.byteLength(data) > 128 * 1024) throw fail('Message is too large.', 413);
+    size += chunk.length;
+    if (size > 128 * 1024) throw fail('Message is too large.', 413);
+    chunks.push(chunk);
   }
-  try { return JSON.parse(data); } catch { throw fail('Invalid JSON.'); }
+  try { return JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { throw fail('Invalid JSON.'); }
 }
 
 export async function createHarness({ port = 0, directory = join(root, '.data'), auth, fetcher = fetch } = {}) {
@@ -39,7 +41,12 @@ export async function createHarness({ port = 0, directory = join(root, '.data'),
   const cookie = `harness_session=${randomBytes(32).toString('hex')}`;
   let origin, catalog = [], catalogAt = 0;
   const running = new Set();
-  const persist = () => store.write('chats.json', chats);
+  const commitChat = (chat, changes) => {
+    const updated = { ...chat, ...changes };
+    store.write('chats.json', chats.map(item => item === chat ? updated : item));
+    // Publish in-memory state only after the atomic disk write succeeds.
+    Object.assign(chat, changes);
+  };
 
   async function models() {
     const token = await auth.accessToken();
@@ -90,7 +97,8 @@ export async function createHarness({ port = 0, directory = join(root, '.data'),
       }
       if (url.pathname === '/api/chats' && request.method === 'POST') {
         const chat = { id: randomUUID(), title: 'New chat', model: '', effort: 'default', fast: false, messages: [], input: [] };
-        chats.unshift(chat); persist(); return json(response, view(chat), 201);
+        store.write('chats.json', [chat, ...chats]);
+        chats.unshift(chat); return json(response, view(chat), 201);
       }
       const match = url.pathname.match(/^\/api\/chats\/([\w-]+)(\/messages)?$/);
       if (!match) throw fail('Not found.', 404);
@@ -106,9 +114,7 @@ export async function createHarness({ port = 0, directory = join(root, '.data'),
         const selected = resolveModel(await models(), body.model);
         if (body.effort !== 'default' && !selected.efforts.includes(body.effort)) throw fail('Choose a supported effort.');
         if (running.has(chat.id)) throw fail('This chat is already generating a reply.', 409);
-        chat.model = body.model; chat.effort = body.effort;
-        if (body.fast !== undefined) chat.fast = body.fast;
-        persist();
+        commitChat(chat, { model: body.model, effort: body.effort, ...(body.fast !== undefined ? { fast: body.fast } : {}) });
         return json(response, view(chat));
       }
       if (match[2] && request.method === 'POST') {
@@ -122,8 +128,8 @@ export async function createHarness({ port = 0, directory = join(root, '.data'),
         let metadata;
         const saveFailedAttempt = error => {
           if (!metadata) return;
-          (chat.failedAttempts ??= []).push({ text: user.content, error, metadata });
-          persist();
+          try { commitChat(chat, { failedAttempts: [...(chat.failedAttempts ?? []), { text: user.content, error, metadata }] }); }
+          catch (storageError) { return `Failed request diagnostics could not be saved: ${storageError.message}`; }
         };
         try {
           const selected = resolveModel(await models(), chat.model);
@@ -141,13 +147,15 @@ export async function createHarness({ port = 0, directory = join(root, '.data'),
           });
           if (controller.signal.aborted) { saveFailedAttempt('Reply was cancelled.'); return; }
           const text = responseText(output);
-          chat.input.push(user, ...output); // Replay full output, including opaque reasoning, on the next request.
-          chat.messages.push({ role: 'user', text: user.content }, { role: 'assistant', text, metadata });
-          if (chat.messages.length === 2) chat.title = user.content.replace(/\s+/g, ' ').slice(0, 60);
-          persist(); emit({ type: 'done', chat: view(chat) }); response.end();
+          commitChat(chat, {
+            input: [...chat.input, user, ...output], // Replay full output, including opaque reasoning, on the next request.
+            messages: [...chat.messages, { role: 'user', text: user.content }, { role: 'assistant', text, metadata }],
+            title: chat.messages.length === 0 ? user.content.replace(/\s+/g, ' ').slice(0, 60) : chat.title,
+          });
+          emit({ type: 'done', chat: view(chat) }); response.end();
         } catch (error) {
-          saveFailedAttempt(error.message);
-          if (response.headersSent) { emit({ type: 'error', message: error.message }); response.end(); }
+          const diagnosticError = saveFailedAttempt(error.message);
+          if (response.headersSent) { emit({ type: 'error', message: error.message + (diagnosticError ? ` (${diagnosticError})` : '') }); response.end(); }
           else throw error;
         } finally { running.delete(chat.id); }
         return;

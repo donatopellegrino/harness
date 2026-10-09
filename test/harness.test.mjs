@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { generateKeyPair, exportJWK, createLocalJWKSet, SignJWT } from 'jose';
 import { Store } from '../lib/store.mjs';
 import { ChatGPTAuth } from '../lib/auth.mjs';
-import { createHarness } from '../server.mjs';
+import { createHarness, readJSON } from '../server.mjs';
 import { streamReply, normalizeModels, resolveModel, latestUsage } from '../lib/responses.mjs';
 import { accountSynchronizer } from '../public/account-sync.js';
 
@@ -217,6 +217,26 @@ test('a transient account read failure allows the next check to recover', async 
   await sync(); assert.equal(refreshes, 1);
 });
 
+test('an incomplete model refresh is retried even after account status was updated', async () => {
+  const connected = { connected: true, sharing: true, email: 'fixture@example.com' };
+  let current = { connected: false }, models = [], refreshes = 0;
+  const sync = accountSynchronizer({
+    readStatus: async () => connected, currentStatus: () => current,
+    needsRefresh: () => current.sharing && models.length === 0,
+    onChange: async () => {
+      current = connected;
+      if (++refreshes === 1) throw new Error('Temporary model catalog failure');
+      models = ['test'];
+    },
+  });
+  await assert.rejects(sync(), /Temporary model/);
+  await sync();
+  assert.equal(refreshes, 2);
+  assert.deepEqual(models, ['test']);
+  await sync();
+  assert.equal(refreshes, 2);
+});
+
 test('HTTP chat flow: model/effort, full history, isolation, failed-turn rollback and restart', async t => {
   const store = tempStore(t), sent = [];
   const auth = { status: () => ({ connected: true, sharing: true, email: 'test@example.com' }), accessToken: async () => 'private-token' };
@@ -423,4 +443,57 @@ test('usage summaries preserve recorded counts without exposing metadata or reus
   assert.deepEqual(latestUsage([message]), {
     model: 'requested-model', inputTokens: 0, outputTokens: null, totalTokens: null, cachedTokens: null, reasoningTokens: null,
   });
+});
+
+test('JSON requests preserve Unicode split across arbitrary byte chunks and enforce byte limits', async () => {
+  const body = { text: 'Caffè 🐱 漢字' };
+  const bytes = Buffer.from(JSON.stringify(body));
+  const request = { headers: { 'content-type': 'application/json' }, async *[Symbol.asyncIterator]() {
+    for (const byte of bytes) yield Buffer.from([byte]);
+  } };
+  assert.deepEqual(await readJSON(request), body);
+  await assert.rejects(readJSON({ ...request, async *[Symbol.asyncIterator]() { yield Buffer.alloc(128 * 1024 + 1, 32); } }), /too large/);
+});
+
+test('a failed disk commit does not publish a turn or contaminate retries', async t => {
+  const write = Store.prototype.write;
+  t.after(() => { Store.prototype.write = write; });
+  for (const failures of [1, 2]) {
+    const store = tempStore(t), sent = [];
+    store.write('chats.json', [{ id: 'disk-test', title: 'New chat', model: 'test', effort: 'default', messages: [], input: [] }]);
+    const app = await createHarness({ directory: store.directory,
+      auth: { status: () => ({ connected: true, sharing: true }), accessToken: async () => 'fixture' },
+      fetcher: async (url, options) => {
+        if (url.endsWith('/models')) return Response.json({ models: [{ slug: 'test' }] });
+        sent.push(JSON.parse(options.body));
+        return sse([{ type: 'response.completed', response: { status: 'completed', output: output('Saved reply') } }]);
+      },
+    });
+    t.after(() => { app.server.close(); app.server.closeAllConnections(); });
+    const cookie = (await fetch(app.origin)).headers.get('set-cookie').split(';')[0];
+    const call = (path, method = 'GET', body) => fetch(app.origin + path, { method,
+      headers: { Cookie: cookie, Origin: app.origin, 'Content-Type': 'application/json' }, ...(body ? { body: JSON.stringify(body) } : {}) });
+    let remaining = failures;
+    Store.prototype.write = function(name, value) {
+      if (this.directory === store.directory && name === 'chats.json' && remaining > 0) {
+        const message = remaining === failures ? 'turn-write-failed' : 'diagnostic-write-failed';
+        remaining--;
+        throw Object.assign(new Error(message), { code: 'EIO' });
+      }
+      return write.call(this, name, value);
+    };
+    const events = (await (await call('/api/chats/disk-test/messages', 'POST', { text: 'First try' })).text()).trim().split('\n').map(JSON.parse);
+    assert.equal(events.at(-1).type, 'error');
+    assert.match(events.at(-1).message, /turn-write-failed/);
+    const inMemory = (await (await call('/api/state')).json()).chats[0];
+    assert.deepEqual(inMemory.messages, []);
+    assert.equal(inMemory.title, 'New chat');
+    const saved = store.read('chats.json')[0];
+    assert.deepEqual(saved.input, []);
+    assert.deepEqual(saved.messages, []);
+    await (await call('/api/chats/disk-test/messages', 'POST', { text: 'Retry' })).text();
+    assert.deepEqual(sent[1].input, [{ role: 'user', content: 'Retry' }]);
+    assert.equal(store.read('chats.json')[0].messages.length, 2);
+    Store.prototype.write = write;
+  }
 });

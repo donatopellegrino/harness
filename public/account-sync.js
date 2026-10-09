@@ -2,7 +2,7 @@
 // while this page is open through a different origin (for example, the tailnet).
 const signature = status => JSON.stringify([Boolean(status?.connected), Boolean(status?.sharing), status?.email ?? null]);
 
-export function accountSynchronizer({ readStatus, currentStatus, onChange, canSync = () => true }) {
+export function accountSynchronizer({ readStatus, currentStatus, onChange, canSync = () => true, needsRefresh = () => false }) {
   let checking = false;
   return async () => {
     if (checking || !canSync()) return;
@@ -10,7 +10,7 @@ export function accountSynchronizer({ readStatus, currentStatus, onChange, canSy
     try {
       const status = await readStatus();
       // A reply or settings action may have started during the request.
-      if (canSync() && signature(status) !== signature(currentStatus())) await onChange();
+      if (canSync() && (signature(status) !== signature(currentStatus()) || needsRefresh())) await onChange();
     } finally { checking = false; }
   };
 }

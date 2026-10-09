@@ -1,7 +1,7 @@
 import { accountSynchronizer } from '/account-sync.js';
 
 const $ = id => document.getElementById(id);
-let chats = [], models = [], account = {}, activeId, busy = false;
+let chats = [], models = [], account = {}, activeId, busy = false, savingSettings = false;
 let effortPointer = null;
 const active = () => chats.find(chat => chat.id === activeId);
 const CUSTOM_MODEL = '__custom__';
@@ -20,19 +20,20 @@ function replaceChat(chat) {
 }
 function controls() {
   const connected = account.sharing && models.length > 0;
-  $('send').disabled = busy || !connected || !modelID();
+  const locked = busy || savingSettings;
+  $('send').disabled = locked || !connected || !modelID();
   $('send-effort').disabled = $('send').disabled || !$('prompt').value.trim();
   if ($('send-effort').disabled) closeEffortMenu();
-  $('new-chat').disabled = busy;
-  $('model').disabled = busy || !connected;
-  $('model-id').disabled = busy || !connected;
-  $('effort').disabled = busy || !connected;
-  $('speed').disabled = busy || !connected;
-  $('login').disabled = busy;
-  $('logout').disabled = busy;
-  $('prompt').disabled = busy;
+  $('new-chat').disabled = locked;
+  $('model').disabled = locked || !connected;
+  $('model-id').disabled = locked || !connected;
+  $('effort').disabled = locked || !connected;
+  $('speed').disabled = locked || !connected;
+  $('login').disabled = locked;
+  $('logout').disabled = locked;
+  $('prompt').disabled = locked;
   $('send').textContent = busy ? 'Replying…' : 'Send';
-  for (const button of $('chats').children) button.disabled = busy;
+  for (const button of $('chats').children) button.disabled = locked;
   renderContext();
 }
 function renderContext() {
@@ -120,18 +121,26 @@ async function refresh() {
   render();
   if (account.sharing) { models = (await api('/api/models')).models; render(); }
 }
-async function newChat() {
+async function newChat({ preserveDraft = false } = {}) {
   const chat = await api('/api/chats', 'POST'); replaceChat(chat); activeId = chat.id;
-  $('prompt').value = ''; render(); $('prompt').focus();
+  if (!preserveDraft) $('prompt').value = '';
+  render(); $('prompt').focus();
 }
 async function saveSettings() {
+  if (savingSettings) throw new Error('Wait for the settings to finish saving.');
   const model = modelID(), effort = $('effort').value, fast = $('speed').getAttribute('aria-pressed') === 'true';
-  if (!active()) await newChat();
-  const chat = await api(`/api/chats/${activeId}`, 'PATCH', { model, effort, fast });
-  replaceChat(chat);
-  selectModel(model); fillEfforts(); $('effort').value = effort;
-  $('speed').setAttribute('aria-pressed', String(chat.fast));
-  renderContext();
+  savingSettings = true; controls();
+  try {
+    if (!active()) await newChat({ preserveDraft: true });
+    const chatId = activeId;
+    const chat = await api(`/api/chats/${chatId}`, 'PATCH', { model, effort, fast });
+    replaceChat(chat);
+    if (activeId === chatId) {
+      selectModel(model); fillEfforts(); $('effort').value = effort;
+      $('speed').setAttribute('aria-pressed', String(chat.fast));
+      renderContext();
+    }
+  } finally { savingSettings = false; controls(); }
 }
 $('new-chat').onclick = safely(newChat);
 $('model').onchange = safely(async () => {
@@ -237,7 +246,7 @@ document.addEventListener('visibilitychange', () => { if (document.hidden) close
 $('prompt').addEventListener('input', controls);
 $('composer').onsubmit = safely(async event => {
   event.preventDefault();
-  const text = $('prompt').value.trim(); if (!text || busy || !account.sharing) return;
+  const text = $('prompt').value.trim(); if (!text || busy || savingSettings || !account.sharing) return;
   busy = true; controls(); showError('');
   let received = '', done = false;
   try {
@@ -279,7 +288,8 @@ const syncAccount = accountSynchronizer({
   readStatus: () => api('/api/account'),
   currentStatus: () => account,
   onChange: refresh,
-  canSync: () => !busy && !document.hidden,
+  canSync: () => !busy && !savingSettings && !document.hidden,
+  needsRefresh: () => account.sharing && models.length === 0,
 });
 // Background checks are read-only. Transient network errors leave the current UI
 // intact and are retried on the next check; user-initiated actions show errors.

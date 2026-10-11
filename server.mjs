@@ -131,9 +131,9 @@ export async function createHarness({ port = 0, directory = join(root, '.data'),
         const folder = folders.find(item => item.id === folderMatch[1]);
         if (!folder) throw fail('Folder not found.', 404);
         const body = await readJSON(request);
-        if (!body || typeof body !== 'object' || (!('name' in body) && !('parentId' in body))) throw fail('Provide a name or parent folder.');
-        const changes = { ...('name' in body ? { name: itemName(body.name) } : {}),
-          ...('parentId' in body ? { parentId: folderParent(folders, body.parentId, folder.id) } : {}) };
+        if (!body || typeof body !== 'object' || !('name' in body)) throw fail('Provide a folder name.');
+        if ('parentId' in body) throw fail('Existing folders cannot be moved.');
+        const changes = { name: itemName(body.name) };
         store.write('folders.json', folders.map(item => item === folder ? { ...folder, ...changes } : item));
         Object.assign(folder, changes); return json(response, folder);
       }

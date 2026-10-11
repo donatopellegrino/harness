@@ -37,6 +37,7 @@ export function mergeOrganization(current, incoming) {
 }
 
 export function organizationChanges(kind, item, name, parentId) {
+  if (kind === 'folder' && item) return name !== item.name ? { name } : {};
   const nameKey = kind === 'chat' ? 'title' : 'name', parentKey = kind === 'chat' ? 'folderId' : 'parentId';
   return { ...(!item || name !== item[nameKey] ? { [nameKey]: name } : {}),
     ...(!item || parentId !== (item[parentKey] ?? null) ? { [parentKey]: parentId } : {}) };
@@ -64,6 +65,7 @@ export function createFolders({ state, api, onOrganization, onFolder, onSelectCh
     $('organize-heading').textContent = item ? `Edit ${folder ? 'folder' : 'chat'}` : 'New folder';
     $('organize-name').value = item ? (folder ? item.name : item.title) : '';
     $('organize-parent-label').firstChild.textContent = folder ? 'Parent folder ' : 'Folder ';
+    $('organize-parent-label').hidden = folder && !!item;
     const choices = folderChoices(state().folders, folder ? item?.id : null);
     $('organize-parent').replaceChildren(...choices.map(choice => new Option(choice.name, choice.id)));
     $('organize-parent').value = (item ? folder ? item.parentId : item.folderId : selected) ?? '';
@@ -121,7 +123,7 @@ export function createFolders({ state, api, onOrganization, onFolder, onSelectCh
           if (selection?.kind === 'folder' && selection.id === folder.id) { edit('folder', folder); return; }
           selected = folder.id; selection = { kind: 'folder', id: folder.id }; render(); afterRender();
         });
-        label.title = `${folder.name} · Click again to rename or move`; label.setAttribute('aria-pressed', String(selection?.kind === 'folder' && selection.id === folder.id));
+        label.title = `${folder.name} · Click again to rename`; label.setAttribute('aria-pressed', String(selection?.kind === 'folder' && selection.id === folder.id));
         row.append(toggle, label, indicator('folder', folder.id));
         group.append(row, children); container.append(group); contents(folder.id, children);
       }

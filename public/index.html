@@ -10,16 +10,15 @@
 </head>
 <body>
   <aside>
-    <div class="brand">Basic Harness</div>
-    <button id="new-chat">+ New chat</button>
-    <button id="new-folder" type="button">+ New folder</button>
+    <div class="brand">harness<span>your conversations</span></div>
+    <div class="sidebar-actions"><button id="new-chat">+ Chat</button><button id="new-folder" type="button">+ Folder</button></div>
     <nav id="chats" aria-label="Chats and folders"></nav>
     <label class="appearance">Appearance
-      <select id="theme">
+      <span class="select-wrap"><select id="theme">
         <option value="system">System</option>
         <option value="light">Light</option>
         <option value="dark">Dark</option>
-      </select>
+      </select></span>
     </label>
     <div class="account">
       <p id="account-status">Not connected</p>
@@ -32,22 +31,22 @@
     <form id="organize-form">
       <h2 id="organize-heading">Edit</h2>
       <label>Name <input id="organize-name" required maxlength="120" autocomplete="off"></label>
-      <label id="organize-parent-label">Folder <select id="organize-parent"></select></label>
+      <label id="organize-parent-label">Folder <span class="select-wrap"><select id="organize-parent"></select></span></label>
       <p id="organize-error" role="alert" hidden></p>
       <div class="dialog-actions"><button id="organize-cancel" type="button">Cancel</button><button id="organize-save" type="submit">Save</button></div>
     </form>
   </dialog>
   <main>
     <header>
-      <label>Model <select id="model" disabled><option value="">Sign in to load models</option></select></label>
+      <label>Model <span class="select-wrap"><select id="model" disabled><option value="">Sign in to load models</option></select></span></label>
       <input id="model-id" placeholder="Model ID, e.g. gpt-6-sol" aria-label="Model ID" maxlength="128" hidden>
-      <label>Effort <select id="effort" disabled><option value="default">Default</option></select></label>
+      <label>Effort <span class="select-wrap"><select id="effort" disabled><option value="default">Default</option></select></span></label>
       <button id="speed" type="button" aria-pressed="false" title="Request faster processing without changing reasoning effort. Uses more of your plan allowance; availability and speed depend on the model." disabled>⚡ Fast</button>
     </header>
     <p id="error" role="alert" hidden></p>
     <section id="messages" aria-label="Conversation" aria-live="polite"></section>
     <form id="composer">
-      <textarea id="prompt" rows="3" maxlength="32000" placeholder="Message…" aria-label="Message"></textarea>
+      <textarea id="prompt" rows="1" maxlength="32000" placeholder="Message…" aria-label="Message"></textarea>
       <div class="effort-send">
         <div id="send-efforts" role="menu" aria-label="Send with effort" hidden></div>
         <button id="send-effort" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="send-efforts" title="Hold, drag to an effort above, and release to send" disabled>Effort ↑</button>

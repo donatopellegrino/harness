@@ -1,3 +1,5 @@
+import { folderActivityCounts } from './activity.js';
+
 // Folder choices retain full paths so duplicate names remain distinguishable.
 export function folderChoices(folders, exclude = null) {
   const blocked = new Set(exclude ? [exclude] : []);
@@ -42,7 +44,7 @@ export function organizationChanges(kind, item, name, parentId) {
 
 export function createFolders({ state, api, onOrganization, onFolder, onSelectChat, afterRender }) {
   const $ = id => document.getElementById(id);
-  let selected = null, editing = null, saving = false;
+  let selected = null, selection = null, editing = null, saving = false;
   const collapsed = new Set();
   function revealFolder(id) {
     const visited = new Set();
@@ -84,7 +86,7 @@ export function createFolders({ state, api, onOrganization, onFolder, onSelectCh
       else {
         const folder = await api(item ? `/api/folders/${item.id}` : '/api/folders', item ? 'PATCH' : 'POST', changes);
         onFolder(folder);
-        if (!item) selected = folder.id;
+        if (!item) { selected = folder.id; selection = { kind: 'folder', id: folder.id }; }
       }
       if (parent) revealFolder(parent);
       render(); afterRender(); $('organize-dialog').close();
@@ -96,10 +98,11 @@ export function createFolders({ state, api, onOrganization, onFolder, onSelectCh
   };
   function render() {
     const { folders, chats, activeId } = state();
+    if (!selection && activeId) selection = { kind: 'chat', id: activeId };
     if (selected && !folders.some(folder => folder.id === selected)) selected = null;
     const nav = $('chats'); nav.replaceChildren();
-    const root = button('Top level', 'folder-label', () => { selected = null; render(); afterRender(); });
-    root.setAttribute('aria-pressed', String(selected === null)); nav.append(root);
+    const root = button('Top level', 'folder-label', () => { selected = null; selection = { kind: 'root' }; render(); afterRender(); });
+    root.setAttribute('aria-pressed', String(selection?.kind === 'root')); nav.append(root);
     const visited = new Set();
     function contents(parentId, container) {
       for (const folder of folders.filter(item => (item.parentId ?? null) === parentId)) {
@@ -114,19 +117,44 @@ export function createFolders({ state, api, onOrganization, onFolder, onSelectCh
           toggle.setAttribute('aria-expanded', String(!children.hidden));
         }, `Expand or collapse ${folder.name}`);
         toggle.setAttribute('aria-expanded', String(!children.hidden));
-        const label = button(`▰ ${folder.name}`, 'folder-label', () => { selected = folder.id; render(); afterRender(); });
-        label.title = folder.name; label.setAttribute('aria-pressed', String(selected === folder.id));
-        row.append(toggle, label, button('✎', 'organize-item', () => edit('folder', folder), `Rename or move folder ${folder.name}`));
+        const label = button(folder.name, 'folder-label', () => {
+          if (selection?.kind === 'folder' && selection.id === folder.id) { edit('folder', folder); return; }
+          selected = folder.id; selection = { kind: 'folder', id: folder.id }; render(); afterRender();
+        });
+        label.title = `${folder.name} · Click again to rename or move`; label.setAttribute('aria-pressed', String(selection?.kind === 'folder' && selection.id === folder.id));
+        row.append(toggle, label, indicator('folder', folder.id));
         group.append(row, children); container.append(group); contents(folder.id, children);
       }
       for (const chat of chats.filter(item => (item.folderId ?? null) === parentId)) {
         const row = document.createElement('div'); row.className = 'sidebar-row';
-        const open = button(chat.title, 'chat-open', () => { selected = chat.folderId ?? null; onSelectChat(chat.id); });
-        open.dataset.chatOpen = ''; open.title = chat.title; open.setAttribute('aria-current', String(chat.id === activeId));
-        row.append(open, button('✎', 'organize-item', () => edit('chat', chat), `Rename or move chat ${chat.title}`)); container.append(row);
+        const open = button(chat.title, 'chat-open', () => {
+          if (selection?.kind === 'chat' && selection.id === chat.id) { edit('chat', chat); return; }
+          const previous = { selected, selection };
+          selected = chat.folderId ?? null; selection = { kind: 'chat', id: chat.id };
+          if (onSelectChat(chat.id) === false) { selected = previous.selected; selection = previous.selection; }
+        });
+        open.dataset.chatOpen = ''; open.dataset.chatId = chat.id; open.title = `${chat.title} · Click again to rename or move`; open.setAttribute('aria-current', String(selection?.kind === 'chat' && chat.id === selection.id));
+        row.append(open, indicator('chat', chat.id)); container.append(row);
       }
     }
-    contents(null, nav);
+    contents(null, nav); updateActivity();
   }
-  return { render, revealFolder, selectedFolder: () => selected };
+  function indicator(kind, id) {
+    const node = document.createElement('span'); node.className = 'activity-indicator'; node.hidden = true;
+    node.dataset[kind === 'chat' ? 'activityChat' : 'activityFolder'] = id;
+    node.setAttribute('role', 'status'); return node;
+  }
+  function updateActivity() {
+    const { folders, chats, activities = new Map() } = state();
+    const counts = folderActivityCounts(folders, chats, activities);
+    for (const node of $('chats').querySelectorAll('.activity-indicator')) {
+      const count = node.dataset.activityFolder ? counts.get(node.dataset.activityFolder) ?? 0 : activities.has(node.dataset.activityChat) ? 1 : 0;
+      const label = node.dataset.activityFolder ? `${count} ${count === 1 ? 'chat' : 'chats'} working` : activities.get(node.dataset.activityChat) === 'compacting' ? 'Compacting context' : 'Generating reply';
+      node.hidden = count === 0;
+      const text = count > 1 ? String(count) : '';
+      if (node.textContent !== text) node.textContent = text;
+      if (node.getAttribute('aria-label') !== label) { node.setAttribute('aria-label', label); node.title = label; }
+    }
+  }
+  return { render, revealFolder, updateActivity, selectChat: (id, folderId) => { selected = folderId ?? null; selection = { kind: 'chat', id }; }, selectedFolder: () => selected };
 }

@@ -1,11 +1,20 @@
 import { accountSynchronizer } from '/account-sync.js';
 import { reconcileCompaction } from '/compaction-sync.js';
 import { createMessageInfo } from '/message-info.js';
+import { resizeComposer } from '/composer.js';
 import { createFolders, mergeChat, mergeOrganization } from '/folders.js';
 
 const $ = id => document.getElementById(id);
 let chats = [], folders = [], models = [], account = {}, activeId, busy = false, compacting = false, savingSettings = false;
 let effortPointer = null;
+let activities = new Map(), activityRevision = -1, activityEpoch = 0, lastBusy = false, checkingActivity = false;
+function applyActivity(snapshot) {
+  if (!snapshot || snapshot.revision < activityRevision) return;
+  activityRevision = snapshot.revision;
+  activities = new Map(snapshot.chats.filter(chat => chat.activity).map(chat => [chat.id, chat.activity]));
+  folderSidebar.updateActivity();
+}
+const displayedActivities = () => { const result = new Map(activities); if (busy && activeId) result.set(activeId, compacting ? 'compacting' : 'replying'); return result; };
 const active = () => chats.find(chat => chat.id === activeId);
 const CUSTOM_MODEL = '__custom__';
 const modelID = () => $('model').value === CUSTOM_MODEL ? $('model-id').value.trim() : $('model').value;
@@ -22,15 +31,18 @@ function replaceChat(chat) {
   const index = chats.findIndex(item => item.id === chat.id);
   if (index < 0) chats.unshift(chat); else chats[index] = mergeChat(chats[index], chat);
 }
-const folderSidebar = createFolders({ state: () => ({ folders, chats, activeId }), api,
+const folderSidebar = createFolders({ state: () => ({ folders, chats, activeId, activities: displayedActivities() }), api,
   onOrganization: update => { const index = chats.findIndex(chat => chat.id === update.id); if (index >= 0) chats[index] = mergeOrganization(chats[index], update); },
   onFolder: folder => { const index = folders.findIndex(item => item.id === folder.id); if (index < 0) folders.push(folder); else folders[index] = folder; },
-  onSelectChat: id => { if (busy || savingSettings) return; activeId = id; $('prompt').value = ''; render(); },
+  onSelectChat: id => { if (id === activeId) { renderChats(); controls(); return true; } if (busy || savingSettings) return false; activeId = id; $('prompt').value = ''; render(); return true; },
   afterRender: controls,
 });
 const messageInfo = createMessageInfo({ load: (chatId, index) => api(`/api/chats/${chatId}/messages/${index}/metadata`) });
 $('messages').addEventListener('scroll', () => messageInfo.close());
 function controls() {
+  if (lastBusy !== busy) { activityEpoch++; if (!busy && activeId) activities.delete(activeId); lastBusy = busy; }
+  resizeComposer($('prompt'));
+  folderSidebar.updateActivity();
   const connected = account.sharing && models.length > 0;
   const locked = busy || savingSettings;
   $('send').disabled = locked || !connected || !modelID();
@@ -47,7 +59,7 @@ function controls() {
   $('send').textContent = busy && !compacting ? 'Replying…' : 'Send';
   $('compact').disabled = locked || !connected || !modelID() || !active()?.messages.length;
   $('compact').textContent = compacting ? 'Compacting…' : 'Compact context';
-  for (const button of $('chats').querySelectorAll('[data-chat-open]')) button.disabled = locked;
+  for (const button of $('chats').querySelectorAll('[data-chat-open]')) button.disabled = locked && button.dataset.chatId !== activeId;
   renderContext();
 }
 function renderContext() {
@@ -126,7 +138,7 @@ function render() {
   $('speed').setAttribute('aria-pressed', String(active()?.fast === true));
 }
 async function refresh() {
-  const state = await api('/api/state'); chats = state.chats; folders = state.folders ?? []; account = state.auth;
+  const state = await api('/api/state'); chats = state.chats; folders = state.folders ?? []; account = state.auth; applyActivity(state.activity);
   $('account-status').textContent = account.connected ? `${account.email ?? 'Connected'}\n${account.sharing ? 'Using ChatGPT plan' : 'Plan usage not enabled'}` : 'Not connected';
   $('login').hidden = account.connected && account.sharing;
   $('login').textContent = account.connected ? 'Enable ChatGPT plan usage' : 'Continue with ChatGPT';
@@ -137,7 +149,7 @@ async function refresh() {
   if (account.sharing) { models = (await api('/api/models')).models; render(); }
 }
 async function newChat({ preserveDraft = false } = {}) {
-  const chat = await api('/api/chats', 'POST', { folderId: folderSidebar.selectedFolder() }); replaceChat(chat); activeId = chat.id; folderSidebar.revealFolder(chat.folderId);
+  const chat = await api('/api/chats', 'POST', { folderId: folderSidebar.selectedFolder() }); replaceChat(chat); activeId = chat.id; folderSidebar.selectChat(chat.id, chat.folderId); folderSidebar.revealFolder(chat.folderId);
   if (!preserveDraft) $('prompt').value = '';
   render(); $('prompt').focus();
 }
@@ -356,3 +368,15 @@ const checkAccount = () => { void syncAccount().catch(() => {}); };
 setInterval(checkAccount, 3000);
 window.addEventListener('focus', checkAccount);
 document.addEventListener('visibilitychange', checkAccount);
+
+window.addEventListener('resize', () => resizeComposer($('prompt')));
+async function checkActivity() {
+  if (checkingActivity || document.hidden) return;
+  checkingActivity = true; const epoch = activityEpoch;
+  try { const snapshot = await api('/api/activity'); if (epoch === activityEpoch) applyActivity(snapshot); }
+  catch { /* Transient failures keep known activity until the next read. */ }
+  finally { checkingActivity = false; }
+}
+setInterval(checkActivity, 1000);
+window.addEventListener('focus', checkActivity);
+document.addEventListener('visibilitychange', checkActivity);

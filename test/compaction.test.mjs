@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { Store } from '../lib/store.mjs';
 import { createHarness } from '../server.mjs';
 import { autoCompactThreshold } from '../lib/responses.mjs';
+import { reconcileCompaction } from '../public/compaction-sync.js';
 
 const checkpoint = id => ({ type: 'compaction', id, encrypted_content: `encrypted-${id}` });
 const answer = text => ({ type: 'message', role: 'assistant', id: 'message', status: 'completed', content: [{ type: 'output_text', text }] });
@@ -220,4 +221,51 @@ test('closing a manual compaction stream cancels inference and preserves the old
   assert.deepEqual(saved.messages, seed().messages);
   assert.equal(saved.failedAttempts[0].operation, 'compaction');
   assert.equal(saved.failedAttempts[0].metadata.error.name, 'AbortError');
+});
+
+test('a lost manual completion acknowledgment is reconciled from durable state', async t => {
+  for (const disconnect of [false, true]) await t.test(disconnect ? 'socket closes after commit' : 'done frame is missing', async t => {
+    const f = await fixture(t, () => sse([complete([checkpoint('saved-before-disconnect')])]));
+    // Lose the browser acknowledgment after the real handler commits the chat.
+    f.app.server.on('request', (request, response) => {
+      if (request.url !== '/api/chats/chat/compact') return;
+      const write = response.write;
+      response.write = function(chunk, ...args) {
+        if (String(chunk).startsWith('{"type":"done"')) {
+          if (disconnect) this.destroy();
+          return true;
+        }
+        return write.call(this, chunk, ...args);
+      };
+    });
+    const response = await f.call('/api/chats/chat/compact', 'POST', {});
+    if (disconnect) await assert.rejects(response.text());
+    else assert.equal((await events(response)).some(item => item.type === 'done'), false);
+    let displayed;
+    const confirmed = await reconcileCompaction({ chatId: 'chat', previousCount: 0,
+      readState: async () => (await f.call('/api/state')).json(),
+      onChat: chat => { displayed = chat; },
+    });
+    assert.equal(confirmed, true);
+    assert.equal(displayed.compactionCount, 1);
+    assert.equal(displayed.contextUsageSource, 'compaction');
+    assert.equal(displayed.contextUsage.totalTokens, 100);
+    assert.deepEqual(displayed.messages, seed().messages);
+    assert.deepEqual(f.store.read('chats.json')[0].input, [checkpoint('saved-before-disconnect')]);
+  });
+});
+
+test('reconciliation distinguishes an uncommitted operation and does not claim success when saved state cannot be read', async t => {
+  const f = await fixture(t, () => sse([{ type: 'response.failed', response: { status: 'failed', error: { message: 'Failed' } } }]));
+  await events(await f.call('/api/chats/chat/compact', 'POST', {}));
+  let displayed;
+  const confirmed = await reconcileCompaction({ chatId: 'chat', previousCount: 0,
+    readState: async () => (await f.call('/api/state')).json(), onChat: chat => { displayed = chat; },
+  });
+  assert.equal(confirmed, false);
+  assert.equal(displayed.compactionCount, 0);
+  assert.deepEqual(displayed.messages, seed().messages);
+  await assert.rejects(reconcileCompaction({ chatId: 'chat', previousCount: 0,
+    readState: async () => { throw new Error('Offline'); }, onChat() { throw new Error('Must not publish an unknown state'); },
+  }), /Offline/);
 });

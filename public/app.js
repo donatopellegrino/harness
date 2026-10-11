@@ -1,4 +1,5 @@
 import { accountSynchronizer } from '/account-sync.js';
+import { reconcileCompaction } from '/compaction-sync.js';
 
 const $ = id => document.getElementById(id);
 let chats = [], models = [], account = {}, activeId, busy = false, compacting = false, savingSettings = false;
@@ -197,13 +198,30 @@ async function readEvents(response, onEvent) {
 $('compact').onclick = safely(async () => {
   if (busy || savingSettings || !active()?.messages.length) return;
   compacting = true; busy = true; controls(); showStatus('Compacting context… This can take a few minutes.');
-  let done = false;
+  let done = false, requested = false, previousCount = active().compactionCount ?? 0;
+  const chatId = activeId;
   try {
     await saveSettings();
-    const response = await fetch(`/api/chats/${activeId}/compact`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    previousCount = active().compactionCount ?? 0;
+    requested = true;
+    const response = await fetch(`/api/chats/${chatId}/compact`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
     await readEvents(response, item => { if (item.type === 'done') { replaceChat(item.chat); done = true; } });
-    if (!done) throw new Error('Compaction did not finish. History was not changed. Try again.');
-  } catch (error) { showStatus(''); throw error; }
+    if (!done) throw new Error('Compaction completion could not be confirmed.');
+  } catch (error) {
+    showStatus('');
+    if (!requested) throw error;
+    let confirmed;
+    try {
+      confirmed = await reconcileCompaction({ chatId, previousCount,
+        readState: () => api('/api/state'),
+        onChat: chat => { replaceChat(chat); renderMessages(); },
+      });
+    } catch {
+      throw new Error(`${error.message} Reload the page to check saved state before retrying compaction.`);
+    }
+    if (!confirmed) throw error;
+    showStatus('Context compacted. Saved state was refreshed after the interrupted request.');
+  }
   finally { compacting = false; busy = false; controls(); }
 });
 

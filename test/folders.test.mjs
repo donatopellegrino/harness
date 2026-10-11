@@ -1,0 +1,115 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync, mkdirSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createHarness } from '../server.mjs';
+import { Store } from '../lib/store.mjs';
+import { folderChoices, mergeChat } from '../public/folders.js';
+
+async function fixture(t, respond) {
+  const directory = mkdtempSync(join(tmpdir(), 'harness-folders-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const store = new Store(directory);
+  store.write('chats.json', [{ id: 'old', title: 'Existing', model: 'gpt-6.1-sol', effort: 'high', messages: [], input: [] }]);
+  const auth = { status: () => ({ connected: false }), accessToken: async () => 'fixture-token' };
+  const fetcher = async (url, options) => {
+    if (url.endsWith('/models')) return Response.json({ models: [{ slug: 'gpt-6.1-sol', max_context_window: 872000, supported_reasoning_efforts: ['high'] }] });
+    if (!respond) throw new Error('Unexpected inference');
+    return respond(JSON.parse(options.body));
+  };
+  async function connect() {
+    const app = await createHarness({ directory, auth, fetcher });
+    t.after(() => { app.server.close(); app.server.closeAllConnections(); });
+    const page = await fetch(app.origin); await page.text();
+    const cookie = page.headers.get('set-cookie').split(';')[0];
+    const call = (path, method = 'GET', body) => fetch(app.origin + path, { method,
+      headers: { Cookie: cookie, Origin: app.origin, 'Content-Type': 'application/json' },
+      ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
+    return { app, call };
+  }
+  return { store, connect, ...await connect() };
+}
+const completed = () => new Response(`data: ${JSON.stringify({ type: 'response.completed', response: { status: 'completed', output: [
+  { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Reply' }] },
+] } })}\n\n`);
+
+test('nested folders, chat moves and renames persist across restart; old chats start at the top level', async t => {
+  const f = await fixture(t);
+  let state = await (await f.call('/api/state')).json();
+  assert.deepEqual(state.folders, []); assert.equal(state.chats[0].folderId, null);
+  const parent = await (await f.call('/api/folders', 'POST', { name: ' Projects ' })).json();
+  const child = await (await f.call('/api/folders', 'POST', { name: 'Research', parentId: parent.id })).json();
+  const nested = await (await f.call('/api/chats', 'POST', { folderId: child.id })).json();
+  assert.equal(nested.folderId, child.id);
+  assert.equal((await f.call(`/api/folders/${parent.id}`, 'PATCH', { name: 'Work' })).status, 200);
+  assert.equal((await f.call('/api/chats/old/organization', 'PATCH', { title: 'My name', folderId: child.id })).status, 200);
+  assert.equal((await f.call(`/api/folders/${child.id}`, 'PATCH', { parentId: null })).status, 200);
+  assert.equal((await f.call(`/api/chats/${nested.id}/organization`, 'PATCH', { folderId: null })).status, 200);
+  f.app.server.closeAllConnections(); await new Promise(resolve => f.app.server.close(resolve));
+  const reopened = await f.connect(); state = await (await reopened.call('/api/state')).json();
+  assert.equal(state.folders.find(folder => folder.id === parent.id).name, 'Work');
+  assert.equal(state.folders.find(folder => folder.id === child.id).parentId, null);
+  const old = state.chats.find(chat => chat.id === 'old'); assert.equal(old.title, 'My name'); assert.equal(old.folderId, child.id);
+  assert.equal(state.chats.find(chat => chat.id === nested.id).folderId, null);
+});
+
+test('cycles, missing parents and invalid names are rejected without changing structure; routes require session and origin', async t => {
+  const f = await fixture(t);
+  const parent = await (await f.call('/api/folders', 'POST', { name: 'A' })).json();
+  const child = await (await f.call('/api/folders', 'POST', { name: 'B', parentId: parent.id })).json();
+  const grandchild = await (await f.call('/api/folders', 'POST', { name: 'C', parentId: child.id })).json();
+  for (const parentId of [parent.id, child.id, grandchild.id]) assert.equal((await f.call(`/api/folders/${parent.id}`, 'PATCH', { parentId })).status, 400);
+  for (const name of ['', '  ', 'x'.repeat(121), 1]) {
+    assert.equal((await f.call('/api/folders', 'POST', { name })).status, 400);
+    assert.equal((await f.call('/api/chats/old/organization', 'PATCH', { title: name })).status, 400);
+  }
+  assert.equal((await f.call('/api/folders', 'POST', { name: 'Missing', parentId: 'missing' })).status, 404);
+  assert.equal((await f.call('/api/chats/old/organization', 'PATCH', { folderId: 'missing' })).status, 404);
+  assert.equal((await f.call('/api/chats', 'POST', { folderId: 'missing' })).status, 404);
+  assert.equal((await f.call(`/api/folders/${child.id}`, 'PATCH', { parentId: 10 })).status, 400);
+  assert.equal((await fetch(f.app.origin + '/api/folders', { method: 'POST' })).status, 403);
+  assert.equal((await fetch(f.app.origin + '/api/chats/old/organization', { method: 'PATCH', headers: { Origin: 'https://other.example' } })).status, 403);
+  assert.equal(f.store.read('folders.json').length, 3);
+  assert.equal(f.store.read('folders.json')[0].parentId, null);
+  assert.equal(f.store.read('chats.json')[0].title, 'Existing');
+});
+
+test('renaming and moving during first generation is preserved by the completed turn and does not alter inference input', async t => {
+  let release, signalStarted;
+  const started = new Promise(resolve => { signalStarted = resolve; });
+  const held = new Promise(resolve => { release = resolve; });
+  let request;
+  const f = await fixture(t, async body => { request = body; signalStarted(); await held; return completed(); });
+  const folder = await (await f.call('/api/folders', 'POST', { name: 'During reply' })).json();
+  const stream = await f.call('/api/chats/old/messages', 'POST', { text: 'Automatic title?' });
+  await started;
+  const edited = await (await f.call('/api/chats/old/organization', 'PATCH', { title: 'Keep this title', folderId: folder.id })).json();
+  assert.equal(edited.title, 'Keep this title');
+  assert.equal((await f.call(`/api/folders/${folder.id}`, 'PATCH', { name: 'Renamed during reply' })).status, 200);
+  release(); const events = (await stream.text()).trim().split('\n').map(JSON.parse);
+  assert.equal(events.at(-1).chat.title, 'Keep this title'); assert.equal(events.at(-1).chat.folderId, folder.id);
+  assert.deepEqual(request.input, [{ role: 'user', content: 'Automatic title?' }]);
+  assert.equal(request.folderId, undefined);
+  const saved = f.store.read('chats.json')[0]; assert.equal(saved.title, 'Keep this title'); assert.equal(saved.messages.length, 2);
+});
+
+test('a failed folder write does not publish a rename in memory', async t => {
+  const f = await fixture(t);
+  const folder = await (await f.call('/api/folders', 'POST', { name: 'Original' })).json();
+  const target = join(f.store.directory, 'folders.json'); rmSync(target); mkdirSync(target);
+  assert.equal((await f.call(`/api/folders/${folder.id}`, 'PATCH', { name: 'Not saved' })).status, 400);
+  const state = await (await f.call('/api/state')).json(); assert.equal(state.folders[0].name, 'Original');
+});
+
+test('move choices omit a folder and descendants; out-of-order organization and generation replies preserve both changes', () => {
+  const folders = [{ id: 'a', name: 'A', parentId: null }, { id: 'b', name: 'B', parentId: 'a' }, { id: 'c', name: 'C', parentId: 'b' }, { id: 'd', name: 'D', parentId: null }];
+  assert.deepEqual(folderChoices(folders, 'a').map(item => item.id), ['', 'd']);
+  assert.equal(folderChoices(folders)[3].name, 'A / B / C');
+  const renamed = { title: 'New name', folderId: 'b', organizationVersion: 1, messages: [], compactionCount: 0 };
+  const generation = { title: 'Old name', folderId: null, organizationVersion: 0, messages: [{ text: 'New reply' }], compactionCount: 1 };
+  for (const [current, incoming] of [[renamed, generation], [generation, renamed]]) {
+    const merged = mergeChat(current, incoming); assert.equal(merged.title, 'New name'); assert.equal(merged.folderId, 'b');
+    assert.equal(merged.messages.length, 1); assert.equal(merged.compactionCount, 1);
+  }
+});

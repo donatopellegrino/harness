@@ -24,11 +24,23 @@ export function mergeChat(current, incoming) {
   if (!current) return incoming;
   const conversation = current.messages.length > incoming.messages.length || (current.compactionCount ?? 0) > (incoming.compactionCount ?? 0)
     ? { ...incoming, ...current } : incoming;
-  const organization = (current.organizationVersion ?? 0) > (incoming.organizationVersion ?? 0) ? current : incoming;
+  const currentVersion = current.organizationVersion ?? 0, incomingVersion = incoming.organizationVersion ?? 0;
+  const organization = currentVersion === incomingVersion ? conversation : currentVersion > incomingVersion ? current : incoming;
   return { ...conversation, title: organization.title, folderId: organization.folderId, organizationVersion: organization.organizationVersion };
 }
 
-export function createFolders({ state, api, onChat, onFolder, onSelectChat, afterRender }) {
+export function mergeOrganization(current, incoming) {
+  if ((incoming.organizationVersion ?? 0) <= (current.organizationVersion ?? 0)) return current;
+  return { ...current, title: incoming.title, folderId: incoming.folderId, organizationVersion: incoming.organizationVersion };
+}
+
+export function organizationChanges(kind, item, name, parentId) {
+  const nameKey = kind === 'chat' ? 'title' : 'name', parentKey = kind === 'chat' ? 'folderId' : 'parentId';
+  return { ...(!item || name !== item[nameKey] ? { [nameKey]: name } : {}),
+    ...(!item || parentId !== (item[parentKey] ?? null) ? { [parentKey]: parentId } : {}) };
+}
+
+export function createFolders({ state, api, onOrganization, onFolder, onSelectChat, afterRender }) {
   const $ = id => document.getElementById(id);
   let selected = null, editing = null, saving = false;
   const collapsed = new Set();
@@ -63,12 +75,14 @@ export function createFolders({ state, api, onChat, onFolder, onSelectChat, afte
     event.preventDefault(); if (saving || !editing) return;
     const { kind, item } = editing, name = $('organize-name').value.trim(), parent = $('organize-parent').value || null;
     if (!name) { $('organize-error').textContent = 'Enter a name.'; $('organize-error').hidden = false; return; }
+    const changes = organizationChanges(kind, item, name, parent);
+    if (!Object.keys(changes).length) { $('organize-dialog').close(); return; }
     saving = true;
     for (const control of $('organize-form').querySelectorAll('input, select, button')) control.disabled = true;
     try {
-      if (kind === 'chat') onChat(await api(`/api/chats/${item.id}/organization`, 'PATCH', { title: name, folderId: parent }));
+      if (kind === 'chat') onOrganization(await api(`/api/chats/${item.id}/organization`, 'PATCH', changes));
       else {
-        const folder = await api(item ? `/api/folders/${item.id}` : '/api/folders', item ? 'PATCH' : 'POST', { name, parentId: parent });
+        const folder = await api(item ? `/api/folders/${item.id}` : '/api/folders', item ? 'PATCH' : 'POST', changes);
         onFolder(folder);
         if (!item) selected = folder.id;
       }

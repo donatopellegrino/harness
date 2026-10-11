@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHarness } from '../server.mjs';
 import { Store } from '../lib/store.mjs';
-import { folderChoices, mergeChat } from '../public/folders.js';
+import { folderChoices, mergeChat, mergeOrganization, organizationChanges } from '../public/folders.js';
 
 async function fixture(t, respond) {
   const directory = mkdtempSync(join(tmpdir(), 'harness-folders-'));
@@ -100,6 +100,48 @@ test('a failed folder write does not publish a rename in memory', async t => {
   const target = join(f.store.directory, 'folders.json'); rmSync(target); mkdirSync(target);
   assert.equal((await f.call(`/api/folders/${folder.id}`, 'PATCH', { name: 'Not saved' })).status, 400);
   const state = await (await f.call('/api/state')).json(); assert.equal(state.folders[0].name, 'Original');
+});
+
+test('move-only edits preserve automatic titles and delayed organization replies do not restore old settings or history', async t => {
+  const f = await fixture(t, () => completed());
+  const folder = await (await f.call('/api/folders', 'POST', { name: 'Destination' })).json();
+  const original = (await (await f.call('/api/state')).json()).chats[0];
+  const changes = organizationChanges('chat', original, original.title, folder.id);
+  assert.deepEqual(changes, { folderId: folder.id });
+  const delayedMove = await (await f.call('/api/chats/old/organization', 'PATCH', changes)).json();
+  assert.deepEqual(Object.keys(delayedMove).sort(), ['folderId', 'id', 'organizationVersion', 'title']);
+  const settings = await (await f.call('/api/chats/old', 'PATCH', { model: 'gpt-6.1-sol', effort: 'high', fast: true })).json();
+  assert.equal(mergeOrganization(settings, delayedMove).fast, true);
+  const stream = await f.call('/api/chats/old/messages', 'POST', { text: 'Generated first title' });
+  const done = (await stream.text()).trim().split('\n').map(JSON.parse).at(-1).chat;
+  assert.equal(done.title, 'Generated first title'); assert.equal(done.folderId, folder.id);
+  const merged = mergeOrganization(done, delayedMove);
+  assert.equal(merged.title, done.title); assert.equal(merged.messages.length, 2); assert.equal(merged.fast, true);
+  assert.equal(f.store.read('chats.json')[0].titleEdited, undefined);
+  // The dialog was opened before the first response arrived. Moving it after
+  // completion must not submit its stale title as an intentional rename.
+  const afterDoneChanges = organizationChanges('chat', original, original.title, null);
+  assert.deepEqual(afterDoneChanges, {});
+  const moveOut = organizationChanges('chat', { ...original, folderId: folder.id }, original.title, null);
+  assert.deepEqual(moveOut, { folderId: null });
+  await f.call('/api/chats/old/organization', 'PATCH', moveOut);
+  assert.equal(f.store.read('chats.json')[0].title, 'Generated first title');
+});
+
+test('organization merges preserve unrelated settings, newer conversation state and newer names in either response order', () => {
+  const current = { id: 'chat', title: 'Old', folderId: null, organizationVersion: 0, model: 'new-model', effort: 'high', fast: true,
+    messages: [{ text: 'New reply' }], contextUsage: { totalTokens: 50 }, compactionCount: 2 };
+  const staleSnapshot = { ...current, model: 'old-model', effort: 'low', fast: false, messages: [], contextUsage: null, compactionCount: 0,
+    title: 'Renamed', folderId: 'folder', organizationVersion: 1 };
+  const merged = mergeOrganization(current, staleSnapshot);
+  assert.equal(merged.title, 'Renamed'); assert.equal(merged.folderId, 'folder');
+  assert.equal(merged.model, 'new-model'); assert.equal(merged.effort, 'high'); assert.equal(merged.fast, true);
+  assert.deepEqual(merged.messages, current.messages); assert.deepEqual(merged.contextUsage, current.contextUsage); assert.equal(merged.compactionCount, 2);
+  assert.equal(mergeOrganization(merged, { ...staleSnapshot, title: 'Earlier', organizationVersion: 0 }).title, 'Renamed');
+  const beforeReply = { ...staleSnapshot, title: 'New chat' }, afterReply = { ...current, title: 'Generated title', folderId: 'folder', organizationVersion: 1 };
+  for (const [a, b] of [[beforeReply, afterReply], [afterReply, beforeReply]]) assert.equal(mergeChat(a, b).title, 'Generated title');
+  assert.deepEqual(organizationChanges('folder', { name: 'Same', parentId: null }, 'Renamed', null), { name: 'Renamed' });
+  assert.deepEqual(organizationChanges('chat', current, 'Renamed', null), { title: 'Renamed' });
 });
 
 test('move choices omit a folder and descendants; out-of-order organization and generation replies preserve both changes', () => {

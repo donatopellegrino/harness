@@ -1,7 +1,7 @@
 import { accountSynchronizer } from '/account-sync.js';
 import { reconcileCompaction } from '/compaction-sync.js';
 import { createMessageInfo } from '/message-info.js';
-import { createFolders, mergeChat } from '/folders.js';
+import { createFolders, mergeChat, mergeOrganization } from '/folders.js';
 
 const $ = id => document.getElementById(id);
 let chats = [], folders = [], models = [], account = {}, activeId, busy = false, compacting = false, savingSettings = false;
@@ -22,7 +22,8 @@ function replaceChat(chat) {
   const index = chats.findIndex(item => item.id === chat.id);
   if (index < 0) chats.unshift(chat); else chats[index] = mergeChat(chats[index], chat);
 }
-const folderSidebar = createFolders({ state: () => ({ folders, chats, activeId }), api, onChat: replaceChat,
+const folderSidebar = createFolders({ state: () => ({ folders, chats, activeId }), api,
+  onOrganization: update => { const index = chats.findIndex(chat => chat.id === update.id); if (index >= 0) chats[index] = mergeOrganization(chats[index], update); },
   onFolder: folder => { const index = folders.findIndex(item => item.id === folder.id); if (index < 0) folders.push(folder); else folders[index] = folder; },
   onSelectChat: id => { if (busy || savingSettings) return; activeId = id; $('prompt').value = ''; render(); },
   afterRender: controls,

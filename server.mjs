@@ -24,7 +24,8 @@ const json = (response, value, status = 200) => {
   response.end(JSON.stringify(value));
 };
 // Keep the ordinary UI payload small; full metadata stays in protected storage.
-const view = chat => ({ id: chat.id, title: chat.title, folderId: chat.folderId ?? null, organizationVersion: chat.organizationVersion ?? 0, model: chat.model, effort: chat.effort, fast: chat.fast === true,
+const organizationView = chat => ({ id: chat.id, title: chat.title, folderId: chat.folderId ?? null, organizationVersion: chat.organizationVersion ?? 0 });
+const view = chat => ({ ...organizationView(chat), model: chat.model, effort: chat.effort, fast: chat.fast === true,
   contextUsage: chat.contextUsageSource === 'compaction' ? chat.contextUsage : latestUsage(chat.messages),
   contextUsageSource: chat.contextUsageSource === 'compaction' ? 'compaction' : 'reply',
   compactionCount: chat.compactions?.length ?? 0,
@@ -140,7 +141,7 @@ export async function createHarness({ port = 0, directory = join(root, '.data'),
         commitChat(chat, { ...('title' in body ? { title: itemName(body.title), titleEdited: true } : {}),
           ...('folderId' in body ? { folderId: folderParent(folders, body.folderId) } : {}),
           organizationVersion: (chat.organizationVersion ?? 0) + 1 });
-        return json(response, view(chat));
+        return json(response, organizationView(chat));
       }
       if (url.pathname === '/api/chats' && request.method === 'POST') {
         const body = request.headers['transfer-encoding'] || Number(request.headers['content-length']) > 0 ? await readJSON(request) : {};

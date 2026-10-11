@@ -24,6 +24,9 @@ const metadata = () => ({
   events: [
     { type: 'response.output_text.delta', sequence_number: 2, output_index: 0, delta: 'Duplicate streamed body' },
     { type: 'response.reasoning_summary_text.delta', sequence_number: 3, delta: 'Readable summary delta' },
+    { type: 'response.output_text.done', sequence_number: 4, output_index: 0, text: 'Duplicate completed reply body' },
+    { type: 'response.refusal.done', sequence_number: 5, output_index: 0, refusal: 'Duplicate completed refusal body' },
+    { type: 'response.reasoning_summary_text.done', sequence_number: 6, text: 'Readable completed summary' },
   ],
 });
 
@@ -41,9 +44,12 @@ test('readable metadata retains readable and unknown fields while removing opaqu
   assert.equal(data.metadata.response.future_id, raw.response.future_id);
   assert.equal(data.metadata.events[0].sequence_number, 2);
   assert.equal(data.metadata.events[1].delta, 'Readable summary delta');
+  assert.equal(data.metadata.events[2].sequence_number, 4);
+  assert.equal(data.metadata.events[3].output_index, 0);
+  assert.equal(data.metadata.events[4].text, 'Readable completed summary');
   assert.deepEqual(raw, before);
   const serialized = JSON.stringify(data);
-  for (const hidden of ['secret-reasoning', 'secret-compaction', 'secret-auth', 'secret-cookie', 'secret-file-data', 'secret-media', 'Duplicate reply body', 'Duplicate streamed body', 'A'.repeat(200)]) {
+  for (const hidden of ['secret-reasoning', 'secret-compaction', 'secret-auth', 'secret-cookie', 'secret-file-data', 'secret-media', 'Duplicate reply body', 'Duplicate streamed body', 'Duplicate completed reply body', 'Duplicate completed refusal body', 'A'.repeat(200)]) {
     assert.equal(serialized.includes(hidden), false, `Must exclude ${hidden.slice(0, 30)}`);
   }
   assert.equal(data.excluded.find(item => item.reason === 'Encrypted reasoning or compaction state').fields, 2);

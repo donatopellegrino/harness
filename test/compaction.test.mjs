@@ -61,7 +61,7 @@ test('automatic checkpoints prune replay, manual compaction preserves transcript
   let result = await events(await f.call('/api/chats/chat/messages', 'POST', { text: 'Next message' }));
   assert.equal(result.at(-1).type, 'done');
   assert.ok(result.some(item => item.type === 'status' && /automatically compacted/.test(item.message)));
-  assert.equal(f.sent[0].context_management[0].compact_threshold, 436000);
+  assert.equal(f.sent[0].context_management[0].compact_threshold, 348800);
   assert.equal(f.sent[0].instructions, undefined);
   let saved = f.store.read('chats.json')[0];
   assert.equal(saved.input[0].id, 'automatic');
@@ -182,10 +182,11 @@ test('compaction disk failure keeps the old checkpoint in memory and on disk', a
   assert.equal((await events(await f.call('/api/chats/chat/compact', 'POST', {}))).at(-1).type, 'done');
 });
 
-test('automatic compaction uses half the catalog maximum and is unavailable without a supported maximum', () => {
-  assert.equal(autoCompactThreshold({ contextWindow: 272000, maxContextWindow: 872000 }), 436000);
-  assert.equal(autoCompactThreshold({ maxContextWindow: 272000 }), 136000);
-  for (const maximum of [null, undefined, 0, -1, '872000', 1999, Number.MAX_SAFE_INTEGER + 1]) {
+test('automatic compaction uses 40% of the catalog maximum and is unavailable without a supported maximum', () => {
+  assert.equal(autoCompactThreshold({ contextWindow: 272000, maxContextWindow: 872000 }), 348800);
+  assert.equal(autoCompactThreshold({ maxContextWindow: 272000 }), 108800);
+  assert.equal(autoCompactThreshold({ maxContextWindow: 2500 }), 1000);
+  for (const maximum of [null, undefined, 0, -1, '872000', 2499, Number.MAX_SAFE_INTEGER + 1]) {
     assert.equal(autoCompactThreshold({ contextWindow: 272000, maxContextWindow: maximum }), null);
   }
 });
@@ -195,7 +196,7 @@ test('model changes use the selected catalog maximum and custom models have no i
   await f.call('/api/chats/chat', 'PATCH', { model: 'gpt-5.5', effort: 'default' });
   await events(await f.call('/api/chats/chat/messages', 'POST', { text: 'Use GPT-5.5' }));
   assert.equal(f.sent[0].model, 'gpt-5.5');
-  assert.equal(f.sent[0].context_management[0].compact_threshold, 136000);
+  assert.equal(f.sent[0].context_management[0].compact_threshold, 108800);
   await f.call('/api/chats/chat', 'PATCH', { model: 'custom-model', effort: 'default' });
   await events(await f.call('/api/chats/chat/messages', 'POST', { text: 'Use custom model' }));
   assert.equal(f.sent[1].context_management, undefined);

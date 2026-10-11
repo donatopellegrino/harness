@@ -43,7 +43,7 @@ function controls() {
 function renderContext() {
   const selected = models.find(model => model.id === modelID());
   const limit = selected?.maxContextWindow;
-  const threshold = limit && Math.floor(limit / 2) >= 1000 ? Math.floor(limit / 2) : null;
+  const threshold = limit && Math.floor(limit * 0.4) >= 1000 ? Math.floor(limit * 0.4) : null;
   const usage = active()?.contextUsage;
   const number = value => value?.toLocaleString('en-US') ?? 'unavailable';
   const total = usage?.totalTokens ?? (usage?.inputTokens != null && usage?.outputTokens != null ? usage.inputTokens + usage.outputTokens : null);
@@ -54,7 +54,7 @@ function renderContext() {
   $('context-label').textContent = percent != null
     ? `Last request: ${number(total)} / ${capacity} · ${percentText} of catalog maximum`
     : `Catalog maximum: ${capacity}${total != null ? ` · Last request: ${number(total)} tokens` : ''}`;
-  $('context-policy').textContent = threshold ? `Auto compact at ${number(threshold)} tokens (50% of catalog maximum)` : 'Auto compaction unavailable: catalog maximum missing or below the supported threshold.';
+  $('context-policy').textContent = threshold ? `Auto compact at ${number(threshold)} tokens (40% of catalog maximum)` : 'Auto compaction unavailable: catalog maximum missing or below the supported threshold.';
   $('context-meter').hidden = percent == null;
   if (percent != null) $('context-meter').value = Math.min(percent, 100);
   const breakdown = [];

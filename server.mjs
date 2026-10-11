@@ -6,12 +6,14 @@ import { dirname, join } from 'node:path';
 import { ChatGPTAuth } from './lib/auth.mjs';
 import { Store } from './lib/store.mjs';
 import { normalizeModels, resolveModel, responseText, streamReply, latestUsage, autoCompactThreshold, compactedInput } from './lib/responses.mjs';
+import { readableMessageMetadata } from './lib/message-metadata.mjs';
 
 const root = dirname(fileURLToPath(import.meta.url));
 const assets = new Map([
   ['/', ['index.html', 'text/html']], ['/app.js', ['app.js', 'text/javascript']], ['/style.css', ['style.css', 'text/css']],
   ['/account-sync.js', ['account-sync.js', 'text/javascript']],
   ['/compaction-sync.js', ['compaction-sync.js', 'text/javascript']],
+  ['/message-info.js', ['message-info.js', 'text/javascript']],
   ['/theme.js', ['theme.js', 'text/javascript']],
 ]);
 const fail = (message, status = 400) => Object.assign(new Error(message), { status });
@@ -90,6 +92,15 @@ export async function createHarness({ port = 0, directory = join(root, '.data'),
       if (url.pathname === '/api/state' && request.method === 'GET') return json(response, { auth: auth.status(), chats: chats.map(view) });
       if (url.pathname === '/api/account' && request.method === 'GET') return json(response, auth.status());
       if (url.pathname === '/api/models' && request.method === 'GET') return json(response, { models: await models() });
+      const metadataMatch = url.pathname.match(/^\/api\/chats\/([\w-]+)\/messages\/(\d+)\/metadata$/);
+      if (metadataMatch && request.method === 'GET') {
+        const chat = chats.find(chat => chat.id === metadataMatch[1]);
+        const index = Number(metadataMatch[2]);
+        if (!chat || !Number.isSafeInteger(index)) throw fail('Message not found.', 404);
+        const data = readableMessageMetadata(chat, index);
+        if (!data) throw fail('Message not found.', 404);
+        return json(response, data);
+      }
       if (url.pathname === '/api/login' && request.method === 'POST') {
         if (running.size) throw fail('Wait for the reply to finish first.', 409);
         return json(response, { url: await auth.begin(origin) });
@@ -178,7 +189,9 @@ export async function createHarness({ port = 0, directory = join(root, '.data'),
           } : {
             input: nextInput, // Keep the latest checkpoint and everything after it.
             compactions, contextUsage: null, contextUsageSource: 'reply',
-            messages: [...chat.messages, { role: 'user', text: user.content }, { role: 'assistant', text, metadata }],
+            messages: [...chat.messages, {
+              role: 'user', text: user.content, metadata: { sent_at: metadata.started_at, request: metadata.request },
+            }, { role: 'assistant', text, metadata }],
             title: chat.messages.length === 0 ? user.content.replace(/\s+/g, ' ').slice(0, 60) : chat.title,
           });
           if (checkpoint) emit({ type: 'status', message: `${manual ? 'Context compacted' : 'Context automatically compacted'}. Chat history is preserved.` });

@@ -1,5 +1,6 @@
 import { accountSynchronizer } from '/account-sync.js';
 import { reconcileCompaction } from '/compaction-sync.js';
+import { createMessageInfo } from '/message-info.js';
 
 const $ = id => document.getElementById(id);
 let chats = [], models = [], account = {}, activeId, busy = false, compacting = false, savingSettings = false;
@@ -20,6 +21,8 @@ function replaceChat(chat) {
   const index = chats.findIndex(item => item.id === chat.id);
   if (index < 0) chats.unshift(chat); else chats[index] = chat;
 }
+const messageInfo = createMessageInfo({ load: (chatId, index) => api(`/api/chats/${chatId}/messages/${index}/metadata`) });
+$('messages').addEventListener('scroll', () => messageInfo.close());
 function controls() {
   const connected = account.sharing && models.length > 0;
   const locked = busy || savingSettings;
@@ -78,14 +81,19 @@ function renderChats() {
     return button;
   }));
 }
-function message(role, text) {
+function message(role, text, record = null) {
   const article = document.createElement('article'); article.className = `message ${role}`;
-  const label = document.createElement('div'); label.className = 'role'; label.textContent = role === 'user' ? 'You' : 'Assistant';
+  const label = document.createElement('div'); label.className = 'role';
+  const name = document.createElement('span'); name.textContent = role === 'user' ? 'You' : 'Assistant';
+  const info = document.createElement('button'); info.type = 'button'; info.className = 'message-info-trigger'; info.textContent = 'ⓘ';
+  info.setAttribute('aria-label', `Message info for ${name.textContent}`);
+  messageInfo.attach(info, record, role); label.append(name, info);
   const content = document.createElement('div'); content.className = 'content'; content.textContent = text;
   article.append(label, content); $('messages').append(article);
   return content;
 }
 function renderMessages() {
+  messageInfo.close();
   $('messages').replaceChildren();
   const history = active()?.messages ?? [];
   if (!history.length) {
@@ -93,7 +101,7 @@ function renderMessages() {
     const title = document.createElement('h1'); title.textContent = 'A simple place to chat.';
     const subtitle = document.createElement('p'); subtitle.textContent = account.sharing ? 'Choose a model and send a message.' : 'Continue with ChatGPT to get started.';
     empty.append(title, subtitle); $('messages').append(empty);
-  } else history.forEach(item => message(item.role, item.text));
+  } else history.forEach((item, index) => message(item.role, item.text, { chatId: activeId, index }));
   $('messages').scrollTop = $('messages').scrollHeight;
 }
 function fillEfforts() {

@@ -45,7 +45,19 @@ select { max-width: 290px; color: var(--text); }
 .empty h1 { font-size: 26px; font-weight: 500; color: var(--heading); }
 .empty p { font-size: 14px; }
 .message { margin: 0 0 26px; }
-.role { font-size: 12px; color: var(--dim); font-weight: 600; margin-bottom: 8px; }
+.role { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--dim); font-weight: 600; margin-bottom: 8px; }
+.message-info-trigger { border: 0; padding: 1px 3px; background: transparent; color: var(--muted); font-size: 15px; line-height: 1; border-radius: 4px; }
+.message-info-panel { position: fixed; z-index: 20; width: min(620px, calc(100vw - 24px)); max-height: calc(100dvh - 24px); padding: 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--control); color: var(--text); box-shadow: 0 8px 30px var(--shadow); font-size: 12px; }
+.message-info-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-bottom: 8px; }
+.message-info-header button { padding: 0 7px; font-size: 20px; border: 0; background: transparent; }
+.message-info-content { max-height: min(65dvh, 510px); overflow: auto; overscroll-behavior: contain; overflow-wrap: anywhere; line-height: 1.5; }
+.message-info-source { color: var(--muted); margin-top: 0; }
+.message-info-facts { display: grid; grid-template-columns: minmax(100px, 1fr) minmax(0, 1.5fr); gap: 4px 12px; }
+.message-info-facts dt { color: var(--muted); }
+.message-info-facts dd { margin: 0; white-space: pre-wrap; }
+.message-info-content details { margin-top: 10px; }
+.message-info-content summary { cursor: pointer; color: var(--muted); }
+.message-info-content pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; padding: 8px; background: var(--surface); border-radius: 6px; }
 .content { line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 15px; }
 .message.user .content { background: var(--surface); padding: 12px 16px; border-radius: 10px; }
 #composer { display: flex; gap: 12px; align-items: flex-end; width: min(100%, 760px); margin: 0 auto; border: 1px solid var(--border); border-radius: 12px; padding: 12px; }

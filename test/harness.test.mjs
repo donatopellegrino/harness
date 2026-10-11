@@ -304,6 +304,9 @@ test('HTTP chat flow: model/effort, full history, isolation, failed-turn rollbac
   assert.equal(savedFirst.messages.length, 4);
   assert.equal(savedFirst.input.at(-1).type, 'message');
   const metadata = savedFirst.messages[1].metadata;
+  assert.equal(savedFirst.messages[0].metadata.sent_at, metadata.started_at);
+  assert.equal(savedFirst.messages[0].metadata.request.reasoning.effort, 'high');
+  assert.equal(savedFirst.messages[0].metadata.request.service_tier, 'priority');
   assert.equal(metadata.request.reasoning.effort, 'high');
   assert.equal(metadata.request.service_tier, 'priority');
   assert.equal(metadata.response.reasoning.effort, 'medium');

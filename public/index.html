@@ -44,9 +44,14 @@
       </div>
       <button id="send" type="submit" disabled>Send</button>
     </form>
+    <div class="context-actions">
+      <button id="compact" type="button" title="Compact the model context while keeping your visible chat history" disabled>Compact context</button>
+      <span id="context-policy"></span>
+    </div>
+    <p id="context-status" role="status" aria-live="polite" hidden></p>
     <details id="context">
       <summary><span id="context-label">Context: limit unavailable</span></summary>
-      <progress id="context-meter" max="100" aria-label="Last reply tokens as a percentage of the catalog context window" hidden></progress>
+      <progress id="context-meter" max="100" aria-label="Last request tokens as a percentage of the catalog maximum" hidden></progress>
       <p id="context-breakdown"></p>
       <p id="context-note"></p>
     </details>

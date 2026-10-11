@@ -58,6 +58,9 @@ textarea { resize: vertical; width: 100%; min-width: 0; max-height: 180px; min-h
 #send-efforts button[data-highlighted="true"], #send-efforts button:focus { background: var(--accent); color: var(--accent-text); outline: none; }
 #speed[aria-pressed="true"] { background: var(--fast-bg); border-color: var(--fast-border); color: var(--fast-text); }
 .hint { text-align: center; font-size: 11px; color: var(--dim); margin: 10px 0 0; }
+.context-actions { display: flex; gap: 12px; align-items: center; width: min(100%, 760px); margin: 10px auto 0; flex-shrink: 0; }
+#context-policy { color: var(--muted); font-size: 12px; }
+#context-status { width: min(100%, 760px); margin: 8px auto 0; color: var(--muted); font-size: 12px; }
 #context { width: min(100%, 760px); max-height: min(35dvh, 280px); overflow: auto; flex-shrink: 0; margin: 10px auto 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
 #context summary { cursor: pointer; overflow-wrap: anywhere; }
 #context summary:focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; border-radius: 3px; }

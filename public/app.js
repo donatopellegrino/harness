@@ -1,12 +1,13 @@
 import { accountSynchronizer } from '/account-sync.js';
 
 const $ = id => document.getElementById(id);
-let chats = [], models = [], account = {}, activeId, busy = false, savingSettings = false;
+let chats = [], models = [], account = {}, activeId, busy = false, compacting = false, savingSettings = false;
 let effortPointer = null;
 const active = () => chats.find(chat => chat.id === activeId);
 const CUSTOM_MODEL = '__custom__';
 const modelID = () => $('model').value === CUSTOM_MODEL ? $('model-id').value.trim() : $('model').value;
 const showError = message => { $('error').textContent = message; $('error').hidden = !message; };
+const showStatus = message => { $('context-status').textContent = message; $('context-status').hidden = !message; };
 const safely = handler => async (...args) => { try { showError(''); await handler(...args); } catch (error) { showError(error.message); } };
 async function api(path, method = 'GET', body) {
   const response = await fetch(path, { method, headers: method === 'GET' ? {} : { 'Content-Type': 'application/json' }, ...(body ? { body: JSON.stringify(body) } : {}) });
@@ -32,13 +33,16 @@ function controls() {
   $('login').disabled = locked;
   $('logout').disabled = locked;
   $('prompt').disabled = locked;
-  $('send').textContent = busy ? 'Replying…' : 'Send';
+  $('send').textContent = busy && !compacting ? 'Replying…' : 'Send';
+  $('compact').disabled = locked || !connected || !modelID() || !active()?.messages.length;
+  $('compact').textContent = compacting ? 'Compacting…' : 'Compact context';
   for (const button of $('chats').children) button.disabled = locked;
   renderContext();
 }
 function renderContext() {
   const selected = models.find(model => model.id === modelID());
-  const limit = selected?.contextWindow;
+  const limit = selected?.maxContextWindow;
+  const threshold = limit && Math.floor(limit / 2) >= 1000 ? Math.floor(limit / 2) : null;
   const usage = active()?.contextUsage;
   const number = value => value?.toLocaleString('en-US') ?? 'unavailable';
   const total = usage?.totalTokens ?? (usage?.inputTokens != null && usage?.outputTokens != null ? usage.inputTokens + usage.outputTokens : null);
@@ -47,21 +51,22 @@ function renderContext() {
   const percentText = percent > 0 && percent < .1 ? '<0.1%' : `${percent?.toFixed(1)}%`;
   const capacity = limit ? `${number(limit)} tokens` : 'limit unavailable';
   $('context-label').textContent = percent != null
-    ? `Context: ${number(total)} / ${capacity} · ${percentText} after last reply`
-    : `Context: ${capacity}${total != null ? ` · Last reply: ${number(total)} tokens` : ''}`;
+    ? `Last request: ${number(total)} / ${capacity} · ${percentText} of catalog maximum`
+    : `Catalog maximum: ${capacity}${total != null ? ` · Last request: ${number(total)} tokens` : ''}`;
+  $('context-policy').textContent = threshold ? `Auto compact at ${number(threshold)} tokens (50% of catalog maximum)` : 'Auto compaction unavailable: catalog maximum missing or below the supported threshold.';
   $('context-meter').hidden = percent == null;
   if (percent != null) $('context-meter').value = Math.min(percent, 100);
   const breakdown = [];
   if (usage) {
-    breakdown.push(`Last reply (${usage.model ?? 'unknown model'}): ${number(usage.inputTokens)} input + ${number(usage.outputTokens)} output tokens.`);
+    breakdown.push(`Last ${active()?.contextUsageSource === 'compaction' ? 'compaction request' : 'reply'} (${usage.model ?? 'unknown model'}): ${number(usage.inputTokens)} input + ${number(usage.outputTokens)} output tokens.`);
     if (usage.cachedTokens != null) breakdown.push(`${number(usage.cachedTokens)} input tokens were cached.`);
     if (usage.reasoningTokens != null) breakdown.push(`${number(usage.reasoningTokens)} reasoning tokens are included in the output count.`);
-  } else breakdown.push(active()?.messages.length ? 'Token usage was not recorded for the latest reply.' : 'Token usage will appear after a completed reply.');
+  } else breakdown.push(active()?.messages.length ? 'Token usage was not recorded for the latest request.' : 'Token usage will appear after a completed reply.');
   $('context-breakdown').textContent = breakdown.join(' ');
-  const notes = [limit ? 'Window size comes from your account model catalog.' : 'The account catalog does not provide a window size for this model.'];
-  if (selected?.maxContextWindow && selected.maxContextWindow !== limit) notes.push(`The catalog separately advertises a maximum of ${number(selected.maxContextWindow)} tokens; it is not used for this meter.`);
-  if (usage) notes.push('Counts are from the last completed reply and exclude your draft; the next request can differ.');
-  if (usage && !sameModel) notes.push('The last reply used a different or unknown model, so its usage is not compared with this window.');
+  const notes = [limit ? 'This maximum is reported by your account catalog; it is not a verified hard limit.' : 'The account catalog does not provide a maximum for this model.'];
+  if (threshold) notes.push('OpenAI checks the rendered context against the automatic threshold during requests.');
+  if (usage) notes.push('The meter uses the last completed request’s input and output usage, including reasoning, and excludes your draft. It is not a live count of the context after compaction.');
+  if (usage && !sameModel) notes.push('The last request used a different or unknown model, so its usage is not compared with this maximum.');
   $('context-note').textContent = notes.join(' ');
 }
 function renderChats() {
@@ -104,6 +109,7 @@ function selectModel(id) {
   $('model-id').value = custom ? id : '';
 }
 function render() {
+  showStatus('');
   renderChats(); renderMessages();
   $('model').replaceChildren(...(models.length ? [...models.map(model => new Option(model.name, model.id)), new Option('Custom model…', CUSTOM_MODEL)] : [new Option('Sign in to load models', '')]));
   selectModel(models.length ? active()?.model || models[0].id : '');
@@ -162,6 +168,43 @@ $('login').onclick = safely(async () => { const { url } = await api('/api/login'
 $('logout').onclick = safely(async () => {
   const result = await api('/api/logout', 'POST'); await refresh();
   if (!result.revoked) showError('Signed out locally. Remote revocation was not confirmed; disconnect Basic Harness in ChatGPT settings.');
+});
+
+async function readEvents(response, onEvent) {
+  if (!response.ok) throw new Error((await response.json()).error ?? 'Request failed.');
+  const reader = response.body.getReader(), decoder = new TextDecoder(); let buffer = '';
+  try {
+    while (true) {
+      const chunk = await reader.read();
+      buffer += chunk.done ? decoder.decode() : decoder.decode(chunk.value, { stream: true });
+      if (chunk.done && buffer.trim()) buffer += '\n';
+      let newline;
+      while ((newline = buffer.indexOf('\n')) >= 0) {
+        const line = buffer.slice(0, newline); buffer = buffer.slice(newline + 1);
+        if (!line.trim()) continue;
+        const item = JSON.parse(line);
+        if (item.type === 'error') throw new Error(item.message);
+        if (item.type === 'notice') showError(item.message);
+        if (item.type === 'status') showStatus(item.message);
+        onEvent(item);
+      }
+      if (chunk.done) break;
+    }
+  } catch (error) { await reader.cancel().catch(() => {}); throw error; }
+  finally { reader.releaseLock(); }
+}
+
+$('compact').onclick = safely(async () => {
+  if (busy || savingSettings || !active()?.messages.length) return;
+  compacting = true; busy = true; controls(); showStatus('Compacting context… This can take a few minutes.');
+  let done = false;
+  try {
+    await saveSettings();
+    const response = await fetch(`/api/chats/${activeId}/compact`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    await readEvents(response, item => { if (item.type === 'done') { replaceChat(item.chat); done = true; } });
+    if (!done) throw new Error('Compaction did not finish. History was not changed. Try again.');
+  } catch (error) { showStatus(''); throw error; }
+  finally { compacting = false; busy = false; controls(); }
 });
 
 function closeEffortMenu() {
@@ -247,7 +290,7 @@ $('prompt').addEventListener('input', controls);
 $('composer').onsubmit = safely(async event => {
   event.preventDefault();
   const text = $('prompt').value.trim(); if (!text || busy || savingSettings || !account.sharing) return;
-  busy = true; controls(); showError('');
+  busy = true; controls(); showError(''); showStatus('');
   let received = '', done = false;
   try {
     await saveSettings();
@@ -255,25 +298,15 @@ $('composer').onsubmit = safely(async event => {
     if (!active().messages.length) $('messages').replaceChildren();
     message('user', text); const reply = message('assistant', 'Thinking…');
     const response = await fetch(`/api/chats/${activeId}/messages`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }) });
-    if (!response.ok) throw new Error((await response.json()).error ?? 'Request failed.');
-    const reader = response.body.getReader(), decoder = new TextDecoder(); let buffer = '';
-    while (true) {
-      const chunk = await reader.read(); if (chunk.done) break;
-      buffer += decoder.decode(chunk.value, { stream: true });
-      let newline;
-      while ((newline = buffer.indexOf('\n')) >= 0) {
-        const item = JSON.parse(buffer.slice(0, newline)); buffer = buffer.slice(newline + 1);
-        if (item.type === 'delta') { received += item.text; reply.textContent = received; $('messages').scrollTop = $('messages').scrollHeight; }
-        if (item.type === 'error') throw new Error(item.message);
-        if (item.type === 'notice') showError(item.message);
-        if (item.type === 'done') { replaceChat(item.chat); done = true; }
-      }
-    }
+    await readEvents(response, item => {
+      if (item.type === 'delta') { received += item.text; reply.textContent = received; $('messages').scrollTop = $('messages').scrollHeight; }
+      if (item.type === 'done') { replaceChat(item.chat); done = true; }
+    });
     if (!done) throw new Error('The reply did not finish. Try again.');
     renderChats(); renderMessages();
   } catch (error) {
     // Failed turns are not added to saved history; preserve the draft for retry.
-    $('prompt').value = text; renderMessages(); throw error;
+    $('prompt').value = text; renderMessages(); showStatus(''); throw error;
   } finally { busy = false; controls(); $('prompt').focus(); }
 });
 $('prompt').addEventListener('keydown', event => {

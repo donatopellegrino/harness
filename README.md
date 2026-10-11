@@ -25,7 +25,11 @@ Chats, selections, host identity, and credentials persist in the ignored `.data/
 
 The sidebar's **Appearance** menu offers **Light**, **Dark**, and **System**. System is the initial setting and follows changes to your device's color scheme automatically. Your selection is saved in this browser for this app address and shared between its open tabs. Appearance remains available during replies and while signed out.
 
-Below the composer, **Context** shows the selected model's window from the account catalog and the last completed reply's total tokens and percentage. Expand it for input, output, cached input, and reasoning counts. Reasoning is already included in output; it is not counted twice. The catalog's separate maximum is listed only in the details and is not treated as the current window. These are historical API usage counts, not a live token count: draft text is excluded and the next request's count may differ. Switching models hides the percentage until usage matches the selected model. Missing catalog limits or unrecorded usage are shown as unavailable rather than estimated.
+Below the composer, **Compact context** requests manual compaction without deleting the visible transcript or sending your draft. During the request the page shows **Compacting context…** and locks chat controls. Very short chats may have nothing to compact: OpenAI requires a compaction threshold of at least 1,000 tokens. Unsupported models, failed requests, cancellation, or missing checkpoints leave the active history unchanged.
+
+Every ordinary reply configures server-side compaction at **50% of the selected model's account catalog `max_context_window`**. The current catalog gives 436,000 tokens for an 872,000 maximum and 136,000 for a 272,000 maximum. OpenAI checks the rendered context during the request, including the newly sent message; the harness does not estimate tokens from character counts. When the maximum is missing or half of it is below the supported 1,000-token threshold, automatic compaction is unavailable and the page says so. There is no fallback to `context_window` or a published API limit.
+
+The **Last request** meter compares the last completed request's usage with that catalog maximum. Expand it for input, output, cached input, and reasoning counts. Reasoning is already included in output; it is not counted twice. These are historical API usage counts, not a live count of context after compaction: draft text is excluded, usage may include the pre-compaction input, and the next request's count may differ. Switching models hides the percentage until usage matches the selected model. Catalog maxima are reported values, not verified hard input limits.
 
 ## How it works
 
@@ -33,7 +37,13 @@ The Node server implements the documented Sign in with ChatGPT flow directly: dy
 
 Requests use the public Responses API with `store: false` and `stream: true`. Each chat replays its own input history, including encrypted reasoning items. A conversation turn is saved only after `response.completed`. No tools are exposed to the model.
 
+Compaction uses `context_management: [{ type: "compaction", compact_threshold: ... }]` on the Responses route, which is available to this ChatGPT credential. The standalone `/responses/compact` endpoint is not used. Manual requests use a threshold of 1,000 with the chat's model, effort, and Fast setting. They add no temporary instructions or user message; the extra generation is archived as maintenance metadata and is not displayed or replayed. Successful manual compaction keeps the encrypted checkpoint as active input. Ordinary replies retain the latest checkpoint and all subsequent output. All pruning is committed atomically only after the response completes and the checkpoint is validated.
+
+The Responses stream signals the returned compaction item, not an exact start event. Automatic requests show **Compacted context received** when that item arrives, then confirmation after it is saved. Manual requests show progress from the moment you press the button. Compaction can lose details; the complete visible transcript and previously saved response metadata remain in local storage.
+
 In `.data/chats.json`, each new assistant message has a `metadata` object containing the request settings (without duplicate input history), local start/finish timestamps, HTTP status and response headers, the unmodified API response object, and every parsed stream event. This preserves model, reasoning effort, service tier, usage, IDs, provider timestamps, annotations, null values, and unknown future fields. Requested settings and reported values are kept separately. Authorization and cookie headers are excluded; request credentials are never archived. Stream events can make this file substantially larger than the visible chat text.
+
+The `compactions` array records successful manual and automatic compactions and archives their superseded `previous_input`, including opaque state from older chats. Manual entries include their complete request/response metadata; automatic metadata remains attached to the corresponding assistant reply. The `input` array contains only the active context for replay, while `messages` preserves the transcript. Both survive restarts. Failed manual requests are recorded in `failedAttempts` with `operation: "compaction"`.
 
 Failed, incomplete, interrupted, or cancelled requests retain their available metadata and error in the chat's `failedAttempts` array, without adding a conversation turn or changing the input history. Metadata survives restarts but is not included in ordinary browser chat payloads or replayed as model input. Only a small numeric usage summary is returned for the Context indicator. Older messages retain their existing data; metadata discarded before this change cannot be recovered.
 
@@ -51,3 +61,4 @@ Automated tests use simulated OAuth and Responses servers, not your subscription
 - [Models and inference](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference)
 - [Preview limitations](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations)
 - [Reasoning effort](https://developers.openai.com/api/docs/guides/reasoning)
+- [Compaction](https://developers.openai.com/api/docs/guides/compaction)

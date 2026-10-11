@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { ChatGPTAuth } from './lib/auth.mjs';
 import { Store } from './lib/store.mjs';
-import { normalizeModels, resolveModel, responseText, streamReply, latestUsage } from './lib/responses.mjs';
+import { normalizeModels, resolveModel, responseText, streamReply, latestUsage, autoCompactThreshold, compactedInput } from './lib/responses.mjs';
 
 const root = dirname(fileURLToPath(import.meta.url));
 const assets = new Map([
@@ -20,7 +20,10 @@ const json = (response, value, status = 200) => {
 };
 // Keep the ordinary UI payload small; full metadata stays in protected storage.
 const view = chat => ({ id: chat.id, title: chat.title, model: chat.model, effort: chat.effort, fast: chat.fast === true,
-  contextUsage: latestUsage(chat.messages), messages: chat.messages.map(({ role, text }) => ({ role, text })) });
+  contextUsage: chat.contextUsageSource === 'compaction' ? chat.contextUsage : latestUsage(chat.messages),
+  contextUsageSource: chat.contextUsageSource === 'compaction' ? 'compaction' : 'reply',
+  compactionCount: chat.compactions?.length ?? 0,
+  messages: chat.messages.map(({ role, text }) => ({ role, text })) });
 
 export async function readJSON(request) {
   if (request.headers['content-type']?.split(';')[0] !== 'application/json') throw fail('Expected JSON.', 415);
@@ -100,7 +103,7 @@ export async function createHarness({ port = 0, directory = join(root, '.data'),
         store.write('chats.json', [chat, ...chats]);
         chats.unshift(chat); return json(response, view(chat), 201);
       }
-      const match = url.pathname.match(/^\/api\/chats\/([\w-]+)(\/messages)?$/);
+      const match = url.pathname.match(/^\/api\/chats\/([\w-]+)(\/(?:messages|compact))?$/);
       if (!match) throw fail('Not found.', 404);
       const chat = chats.find(item => item.id === match[1]);
       if (!chat) throw fail('Chat not found.', 404);
@@ -108,6 +111,7 @@ export async function createHarness({ port = 0, directory = join(root, '.data'),
       const body = await readJSON(request);
       if (!body || typeof body !== 'object') throw fail('Expected a JSON object.');
       if (running.has(chat.id)) throw fail('This chat is already generating a reply.', 409);
+      const manual = match[2] === '/compact';
       if (!match[2] && request.method === 'PATCH') {
         if (typeof body.model !== 'string' || typeof body.effort !== 'string') throw fail('Choose a model and effort.');
         if (body.fast !== undefined && typeof body.fast !== 'boolean') throw fail('Fast mode must be on or off.');
@@ -118,40 +122,65 @@ export async function createHarness({ port = 0, directory = join(root, '.data'),
         return json(response, view(chat));
       }
       if (match[2] && request.method === 'POST') {
-        if (typeof body.text !== 'string' || !body.text.trim() || body.text.length > 32000) throw fail('Enter a message of up to 32,000 characters.');
+        if (manual) {
+          if (!chat.input.length) throw fail('Send a message before compacting this chat.');
+        } else if (typeof body.text !== 'string' || !body.text.trim() || body.text.length > 32000) throw fail('Enter a message of up to 32,000 characters.');
         // Acquire the chat lock before any network await.
         running.add(chat.id);
         const controller = new AbortController();
         response.on('close', () => { if (!response.writableEnded) controller.abort(); });
         const emit = event => { if (!response.destroyed) response.write(`${JSON.stringify(event)}\n`); };
-        const user = { role: 'user', content: body.text.trim() };
+        const user = manual ? null : { role: 'user', content: body.text.trim() };
         let metadata;
         const saveFailedAttempt = error => {
           if (!metadata) return;
-          try { commitChat(chat, { failedAttempts: [...(chat.failedAttempts ?? []), { text: user.content, error, metadata }] }); }
+          try { commitChat(chat, { failedAttempts: [...(chat.failedAttempts ?? []), { ...(manual ? { operation: 'compaction' } : { text: user.content }), error, metadata }] }); }
           catch (storageError) { return `Failed request diagnostics could not be saved: ${storageError.message}`; }
         };
         try {
           const selected = resolveModel(await models(), chat.model);
           if (chat.effort !== 'default' && !selected.efforts.includes(chat.effort)) throw fail('Choose a supported effort.');
           const token = await auth.accessToken();
+          const threshold = manual ? 1000 : autoCompactThreshold(selected);
           response.writeHead(200, { 'Content-Type': 'application/x-ndjson', 'X-Accel-Buffering': 'no' });
           response.flushHeaders();
+          if (manual) emit({ type: 'status', message: 'Compacting context… This can take a few minutes.' });
+          const input = manual ? chat.input : [...chat.input, user];
           const output = await streamReply({
             fetcher, token, model: chat.model, effort: chat.effort, fast: chat.fast === true,
-            input: [...chat.input, user], signal: controller.signal, onDelta: text => emit({ type: 'delta', text }),
+            input, compactThreshold: threshold,
+            // Avoid temporary instructions: OpenAI can carry them into the
+            // encrypted checkpoint. Discard this request's generated reply.
+            ...(manual ? { requireMessage: false } : {}),
+            signal: controller.signal, onDelta: text => { if (!manual) emit({ type: 'delta', text }); },
+            onCompaction: () => emit({ type: 'status', message: 'Compacted context received; finishing the request…' }),
             onServiceTier: tier => {
               if (chat.fast === true && tier === 'default') emit({ type: 'notice', message: 'Fast mode was requested, but OpenAI used Standard processing for this reply.' });
             },
             onMetadata: value => { metadata = value; },
           });
-          if (controller.signal.aborted) { saveFailedAttempt('Reply was cancelled.'); return; }
+          if (controller.signal.aborted) { saveFailedAttempt(manual ? 'Compaction was cancelled.' : 'Reply was cancelled.'); return; }
+          const checkpoint = output.findLast(item => item.type === 'compaction');
+          const nextInput = compactedInput([...input, ...output]);
+          if (manual && !checkpoint) throw fail('Nothing to compact: OpenAI requires at least 1,000 context tokens, or this model did not return a compaction. History was not changed.');
+          const compactions = checkpoint ? [...(chat.compactions ?? []), {
+            mode: manual ? 'manual' : 'automatic', model: chat.model, threshold,
+            completed_at: metadata.finished_at, response_id: metadata.response?.id,
+            previous_input: chat.input, // Archive superseded opaque state as well as visible messages.
+            ...(manual ? { metadata } : {}), // Automatic metadata is already saved with the reply.
+          }] : chat.compactions;
           const text = responseText(output);
-          commitChat(chat, {
-            input: [...chat.input, user, ...output], // Replay full output, including opaque reasoning, on the next request.
+          commitChat(chat, manual ? {
+            // The maintenance generation and its reasoning are not chat turns.
+            input: [checkpoint], compactions,
+            contextUsage: latestUsage([{ role: 'assistant', metadata }]), contextUsageSource: 'compaction',
+          } : {
+            input: nextInput, // Keep the latest checkpoint and everything after it.
+            compactions, contextUsage: null, contextUsageSource: 'reply',
             messages: [...chat.messages, { role: 'user', text: user.content }, { role: 'assistant', text, metadata }],
             title: chat.messages.length === 0 ? user.content.replace(/\s+/g, ' ').slice(0, 60) : chat.title,
           });
+          if (checkpoint) emit({ type: 'status', message: `${manual ? 'Context compacted' : 'Context automatically compacted'}. Chat history is preserved.` });
           emit({ type: 'done', chat: view(chat) }); response.end();
         } catch (error) {
           const diagnosticError = saveFailedAttempt(error.message);

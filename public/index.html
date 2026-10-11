@@ -12,7 +12,8 @@
   <aside>
     <div class="brand">Basic Harness</div>
     <button id="new-chat">+ New chat</button>
-    <nav id="chats" aria-label="Chats"></nav>
+    <button id="new-folder" type="button">+ New folder</button>
+    <nav id="chats" aria-label="Chats and folders"></nav>
     <label class="appearance">Appearance
       <select id="theme">
         <option value="system">System</option>
@@ -27,6 +28,15 @@
       <a href="https://chatgpt.com/#settings/Usage" target="_blank" rel="noopener noreferrer">Manage usage ↗</a>
     </div>
   </aside>
+  <dialog id="organize-dialog">
+    <form id="organize-form">
+      <h2 id="organize-heading">Edit</h2>
+      <label>Name <input id="organize-name" required maxlength="120" autocomplete="off"></label>
+      <label id="organize-parent-label">Folder <select id="organize-parent"></select></label>
+      <p id="organize-error" role="alert" hidden></p>
+      <div class="dialog-actions"><button id="organize-cancel" type="button">Cancel</button><button id="organize-save" type="submit">Save</button></div>
+    </form>
+  </dialog>
   <main>
     <header>
       <label>Model <select id="model" disabled><option value="">Sign in to load models</option></select></label>

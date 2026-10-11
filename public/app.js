@@ -1,9 +1,10 @@
 import { accountSynchronizer } from '/account-sync.js';
 import { reconcileCompaction } from '/compaction-sync.js';
 import { createMessageInfo } from '/message-info.js';
+import { createFolders, mergeChat, mergeOrganization } from '/folders.js';
 
 const $ = id => document.getElementById(id);
-let chats = [], models = [], account = {}, activeId, busy = false, compacting = false, savingSettings = false;
+let chats = [], folders = [], models = [], account = {}, activeId, busy = false, compacting = false, savingSettings = false;
 let effortPointer = null;
 const active = () => chats.find(chat => chat.id === activeId);
 const CUSTOM_MODEL = '__custom__';
@@ -19,8 +20,14 @@ async function api(path, method = 'GET', body) {
 }
 function replaceChat(chat) {
   const index = chats.findIndex(item => item.id === chat.id);
-  if (index < 0) chats.unshift(chat); else chats[index] = chat;
+  if (index < 0) chats.unshift(chat); else chats[index] = mergeChat(chats[index], chat);
 }
+const folderSidebar = createFolders({ state: () => ({ folders, chats, activeId }), api,
+  onOrganization: update => { const index = chats.findIndex(chat => chat.id === update.id); if (index >= 0) chats[index] = mergeOrganization(chats[index], update); },
+  onFolder: folder => { const index = folders.findIndex(item => item.id === folder.id); if (index < 0) folders.push(folder); else folders[index] = folder; },
+  onSelectChat: id => { if (busy || savingSettings) return; activeId = id; $('prompt').value = ''; render(); },
+  afterRender: controls,
+});
 const messageInfo = createMessageInfo({ load: (chatId, index) => api(`/api/chats/${chatId}/messages/${index}/metadata`) });
 $('messages').addEventListener('scroll', () => messageInfo.close());
 function controls() {
@@ -40,7 +47,7 @@ function controls() {
   $('send').textContent = busy && !compacting ? 'Replying…' : 'Send';
   $('compact').disabled = locked || !connected || !modelID() || !active()?.messages.length;
   $('compact').textContent = compacting ? 'Compacting…' : 'Compact context';
-  for (const button of $('chats').children) button.disabled = locked;
+  for (const button of $('chats').querySelectorAll('[data-chat-open]')) button.disabled = locked;
   renderContext();
 }
 function renderContext() {
@@ -73,14 +80,7 @@ function renderContext() {
   if (usage && !sameModel) notes.push('The last request used a different or unknown model, so its usage is not compared with this maximum.');
   $('context-note').textContent = notes.join(' ');
 }
-function renderChats() {
-  $('chats').replaceChildren(...chats.map(chat => {
-    const button = document.createElement('button'); button.textContent = chat.title;
-    button.setAttribute('aria-current', String(chat.id === activeId));
-    button.onclick = safely(async () => { activeId = chat.id; $('prompt').value = ''; render(); });
-    return button;
-  }));
-}
+function renderChats() { folderSidebar.render(); }
 function message(role, text, record = null) {
   const article = document.createElement('article'); article.className = `message ${role}`;
   const label = document.createElement('div'); label.className = 'role';
@@ -126,7 +126,7 @@ function render() {
   $('speed').setAttribute('aria-pressed', String(active()?.fast === true));
 }
 async function refresh() {
-  const state = await api('/api/state'); chats = state.chats; account = state.auth;
+  const state = await api('/api/state'); chats = state.chats; folders = state.folders ?? []; account = state.auth;
   $('account-status').textContent = account.connected ? `${account.email ?? 'Connected'}\n${account.sharing ? 'Using ChatGPT plan' : 'Plan usage not enabled'}` : 'Not connected';
   $('login').hidden = account.connected && account.sharing;
   $('login').textContent = account.connected ? 'Enable ChatGPT plan usage' : 'Continue with ChatGPT';
@@ -137,7 +137,7 @@ async function refresh() {
   if (account.sharing) { models = (await api('/api/models')).models; render(); }
 }
 async function newChat({ preserveDraft = false } = {}) {
-  const chat = await api('/api/chats', 'POST'); replaceChat(chat); activeId = chat.id;
+  const chat = await api('/api/chats', 'POST', { folderId: folderSidebar.selectedFolder() }); replaceChat(chat); activeId = chat.id; folderSidebar.revealFolder(chat.folderId);
   if (!preserveDraft) $('prompt').value = '';
   render(); $('prompt').focus();
 }

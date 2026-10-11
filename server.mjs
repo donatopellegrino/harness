@@ -7,12 +7,14 @@ import { ChatGPTAuth } from './lib/auth.mjs';
 import { Store } from './lib/store.mjs';
 import { normalizeModels, resolveModel, responseText, streamReply, latestUsage, autoCompactThreshold, compactedInput } from './lib/responses.mjs';
 import { readableMessageMetadata } from './lib/message-metadata.mjs';
+import { itemName, folderParent } from './lib/folders.mjs';
 
 const root = dirname(fileURLToPath(import.meta.url));
 const assets = new Map([
   ['/', ['index.html', 'text/html']], ['/app.js', ['app.js', 'text/javascript']], ['/style.css', ['style.css', 'text/css']],
   ['/account-sync.js', ['account-sync.js', 'text/javascript']],
   ['/compaction-sync.js', ['compaction-sync.js', 'text/javascript']],
+  ['/folders.js', ['folders.js', 'text/javascript']],
   ['/message-info.js', ['message-info.js', 'text/javascript']],
   ['/theme.js', ['theme.js', 'text/javascript']],
 ]);
@@ -22,7 +24,8 @@ const json = (response, value, status = 200) => {
   response.end(JSON.stringify(value));
 };
 // Keep the ordinary UI payload small; full metadata stays in protected storage.
-const view = chat => ({ id: chat.id, title: chat.title, model: chat.model, effort: chat.effort, fast: chat.fast === true,
+const organizationView = chat => ({ id: chat.id, title: chat.title, folderId: chat.folderId ?? null, organizationVersion: chat.organizationVersion ?? 0 });
+const view = chat => ({ ...organizationView(chat), model: chat.model, effort: chat.effort, fast: chat.fast === true,
   contextUsage: chat.contextUsageSource === 'compaction' ? chat.contextUsage : latestUsage(chat.messages),
   contextUsageSource: chat.contextUsageSource === 'compaction' ? 'compaction' : 'reply',
   compactionCount: chat.compactions?.length ?? 0,
@@ -44,6 +47,7 @@ export async function createHarness({ port = 0, directory = join(root, '.data'),
   const store = new Store(directory);
   auth ??= new ChatGPTAuth(store);
   const chats = store.read('chats.json', []);
+  const folders = store.read('folders.json', []);
   const cookie = `harness_session=${randomBytes(32).toString('hex')}`;
   let origin, catalog = [], catalogAt = 0;
   const running = new Set();
@@ -89,7 +93,7 @@ export async function createHarness({ port = 0, directory = join(root, '.data'),
       if (request.headers.origin && request.headers.origin !== origin) throw fail('Cross-origin requests are not allowed.', 403);
       if (request.method !== 'GET' && request.headers.origin !== origin) throw fail('A same-origin request is required.', 403);
 
-      if (url.pathname === '/api/state' && request.method === 'GET') return json(response, { auth: auth.status(), chats: chats.map(view) });
+      if (url.pathname === '/api/state' && request.method === 'GET') return json(response, { auth: auth.status(), chats: chats.map(view), folders });
       if (url.pathname === '/api/account' && request.method === 'GET') return json(response, auth.status());
       if (url.pathname === '/api/models' && request.method === 'GET') return json(response, { models: await models() });
       const metadataMatch = url.pathname.match(/^\/api\/chats\/([\w-]+)\/messages\/(\d+)\/metadata$/);
@@ -110,8 +114,39 @@ export async function createHarness({ port = 0, directory = join(root, '.data'),
         const result = await auth.logout(); catalog = []; catalogAt = 0;
         return json(response, result);
       }
+      if (url.pathname === '/api/folders' && request.method === 'POST') {
+        const body = await readJSON(request);
+        const folder = { id: randomUUID(), name: itemName(body?.name), parentId: folderParent(folders, body?.parentId ?? null) };
+        store.write('folders.json', [...folders, folder]);
+        folders.push(folder); return json(response, folder, 201);
+      }
+      const folderMatch = url.pathname.match(/^\/api\/folders\/([\w-]+)$/);
+      if (folderMatch && request.method === 'PATCH') {
+        const folder = folders.find(item => item.id === folderMatch[1]);
+        if (!folder) throw fail('Folder not found.', 404);
+        const body = await readJSON(request);
+        if (!body || typeof body !== 'object' || (!('name' in body) && !('parentId' in body))) throw fail('Provide a name or parent folder.');
+        const changes = { ...('name' in body ? { name: itemName(body.name) } : {}),
+          ...('parentId' in body ? { parentId: folderParent(folders, body.parentId, folder.id) } : {}) };
+        store.write('folders.json', folders.map(item => item === folder ? { ...folder, ...changes } : item));
+        Object.assign(folder, changes); return json(response, folder);
+      }
+      const organizationMatch = url.pathname.match(/^\/api\/chats\/([\w-]+)\/organization$/);
+      if (organizationMatch && request.method === 'PATCH') {
+        const chat = chats.find(item => item.id === organizationMatch[1]);
+        if (!chat) throw fail('Chat not found.', 404);
+        const body = await readJSON(request);
+        if (!body || typeof body !== 'object' || (!('title' in body) && !('folderId' in body))) throw fail('Provide a name or folder.');
+        // Organization is independent of generation settings and can change during a reply.
+        commitChat(chat, { ...('title' in body ? { title: itemName(body.title), titleEdited: true } : {}),
+          ...('folderId' in body ? { folderId: folderParent(folders, body.folderId) } : {}),
+          organizationVersion: (chat.organizationVersion ?? 0) + 1 });
+        return json(response, organizationView(chat));
+      }
       if (url.pathname === '/api/chats' && request.method === 'POST') {
-        const chat = { id: randomUUID(), title: 'New chat', model: '', effort: 'default', fast: false, messages: [], input: [] };
+        const body = request.headers['transfer-encoding'] || Number(request.headers['content-length']) > 0 ? await readJSON(request) : {};
+        const folderId = folderParent(folders, body?.folderId ?? null);
+        const chat = { id: randomUUID(), folderId, title: 'New chat', model: '', effort: 'default', fast: false, messages: [], input: [] };
         store.write('chats.json', [chat, ...chats]);
         chats.unshift(chat); return json(response, view(chat), 201);
       }
@@ -192,7 +227,7 @@ export async function createHarness({ port = 0, directory = join(root, '.data'),
             messages: [...chat.messages, {
               role: 'user', text: user.content, metadata: { sent_at: metadata.started_at, request: metadata.request },
             }, { role: 'assistant', text, metadata }],
-            title: chat.messages.length === 0 ? user.content.replace(/\s+/g, ' ').slice(0, 60) : chat.title,
+            title: chat.messages.length === 0 && !chat.titleEdited ? user.content.replace(/\s+/g, ' ').slice(0, 60) : chat.title,
           });
           if (checkpoint) emit({ type: 'status', message: `${manual ? 'Context compacted' : 'Context automatically compacted'}. Chat history is preserved.` });
           emit({ type: 'done', chat: view(chat) }); response.end();

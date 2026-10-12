@@ -8,7 +8,7 @@ const port = Number(process.env.PORT ?? 43187);
 if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error('PORT must be between 0 and 65535.');
 // Reserve the backend port throughout migration. An old JSON backend must not
 // write while its files are being imported, verified, and removed.
-const guard = createServer();
+const guard = createServer(socket => socket.destroy());
 try {
   await new Promise((resolve, reject) => {
     guard.once('error', reject);

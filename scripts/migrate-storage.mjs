@@ -20,6 +20,10 @@ try {
     console.log('Storage ' + result.status + ': ' + (result.chats ?? 0) + ' chats, ' + (result.messages ?? 0) + ' messages, ' + (result.folders ?? 0) + ' folders.');
     console.log('Database: ' + store.path);
     if (result.backup) console.log('Verified migration backup: ' + result.backup);
+    if (store.schemaUpgrade) {
+      console.log('Context storage upgraded: ' + store.schemaUpgrade.items + ' ordered items verified.');
+      console.log('Verified schema backup: ' + store.schemaUpgrade.backup);
+    }
   } finally { store.close(); }
 } catch (error) {
   console.error(error.code === 'EADDRINUSE' ? 'Stop the running harness before migrating; its backend port is in use.' : error.message);

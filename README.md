@@ -77,6 +77,8 @@ Automated tests use simulated OAuth and Responses servers, not your subscription
 
 All persisted app state uses SQLite. There are no JSON or JSONL storage files after migration. Chat headers and folders have indexed rows; messages, active model context, compaction archives, and failed attempts are ordered individual records. Provider objects remain lossless JSON values inside database columns. Renames update a header, and completed replies commit their messages, context, and metadata in one transaction. The server reads saved chats from SQLite and retains only in-flight chat objects; the current `/api/state` browser payload still includes every chat's visible history.
 
+`chat_items` stores each collection entry's order and a `payload_id`, rather than a copy of its content. `chat_payloads` stores shared records scoped to each chat. Structured records reference their child records; message text, encrypted state, and long strings are stored once and referenced wherever needed. Thus visible messages, response objects, stream events, active context, and compaction archives reuse identical content. Small scalar metadata fields stay inline. Original API objects are reconstructed losslessly before requests or metadata display; the human-readable hover exclusions are unchanged. Unreferenced records are removed in the same transaction as an update, while anything referenced by saved messages or archives is retained. This reduces repeated payloads; SQLite rows and reference records still have overhead, and unique stream deltas are still saved.
+
 SQLite uses WAL journaling, full synchronous commits, foreign keys, and a busy timeout. The directory is owner-only (`0700`) and the database is `0600`. Use one backend process for inference; generation locks are process-local. Appearance remains a browser preference.
 
 For an existing installation, stop the backend first, then run:
@@ -92,8 +94,10 @@ If the running version uses a different storage directory, pass it explicitly:
 npm run migrate -- /absolute/path/to/.data
 ```
 
-The migration reserves the loopback backend port (`PORT`, default `43187`) so an old JSON backend cannot run on that port during conversion. Startup refuses legacy JSON files instead of silently creating an empty replacement store.
+The migration reserves the loopback backend port (`PORT`, default `43187`) so an older backend cannot run on that port during conversion. Startup refuses legacy JSON files or SQLite schema version 1 instead of silently opening incompatible storage.
 
 Migration imports all existing `.json` files in the data directory in one transaction: chats, folders, sign-in credentials, host identity, and additional diagnostic/probe files. It checks the complete imported data, creates and verifies an owner-only `storage.migration-backup-*.sqlite` snapshot, verifies source hashes, then removes the old JSON files. Extra files are retained in `app_state` under `legacy/<filename>`. A migration manifest makes cleanup retryable after interruption without importing old state over newer SQLite data. Invalid or changed sources are kept and reported.
+
+For an existing SQLite version 1 database, the same command creates and verifies an owner-only `storage.context-backup-*.sqlite` snapshot, converts collection entries to shared records, and checks every reconstructed entry against its original value before committing schema version 2. Failed conversions roll back without replacing the old schema; successful upgrades are not repeated. Sign-in state, folders, chat headers, and all metadata are preserved. Finish any interrupted version 1 JSON migration with the previous build before upgrading. Previous SQLite builds reject the newer schema; use this version after upgrading.
 
 The migration snapshot includes credentials and should remain private. It is a pre-migration snapshot, not an ongoing backup. Back up a running database using SQLite's backup API; copying only `storage.sqlite` while WAL writes are active can omit pending data. Do not run an older JSON-storage build against the migrated directory: use the SQLite PR version until it is merged.

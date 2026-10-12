@@ -147,6 +147,14 @@ export function createFolders({ state, api, onOrganization, onFolder, onSelectCh
     node.dataset[kind === 'chat' ? 'activityChat' : 'activityFolder'] = id;
     node.setAttribute('role', 'status'); return node;
   }
+  function restoreActiveSelection() {
+    const { activeId, chats } = state();
+    if (selection?.kind !== 'chat' || selection.id === activeId) return;
+    // An inactive chat may be selected only for editing during a locked reply.
+    // Once unlocked, highlight the conversation that subsequent sends use.
+    selected = chats.find(chat => chat.id === activeId)?.folderId ?? null;
+    selection = { kind: 'chat', id: activeId }; render();
+  }
   function updateActivity() {
     const { folders, chats, activities = new Map() } = state();
     const counts = folderActivityCounts(folders, chats, activities);
@@ -159,5 +167,5 @@ export function createFolders({ state, api, onOrganization, onFolder, onSelectCh
       if (node.getAttribute('aria-label') !== label) { node.setAttribute('aria-label', label); node.title = label; }
     }
   }
-  return { render, revealFolder, updateActivity, selectChat: (id, folderId) => { selected = folderId ?? null; selection = { kind: 'chat', id }; }, selectedFolder: () => selected };
+  return { render, revealFolder, updateActivity, restoreActiveSelection, selectChat: (id, folderId) => { selected = folderId ?? null; selection = { kind: 'chat', id }; }, selectedFolder: () => selected };
 }

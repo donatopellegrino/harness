@@ -7,7 +7,7 @@ import { createFolders, mergeChat, mergeOrganization } from '/folders.js';
 const $ = id => document.getElementById(id);
 let chats = [], folders = [], models = [], account = {}, activeId, busy = false, compacting = false, savingSettings = false;
 let effortPointer = null;
-let activities = new Map(), activityRevision = -1, activityEpoch = 0, lastBusy = false, checkingActivity = false;
+let activities = new Map(), activityRevision = -1, activityEpoch = 0, lastBusy = false, lastLocked = false, checkingActivity = false;
 function applyActivity(snapshot) {
   if (!snapshot || snapshot.revision < activityRevision) return;
   activityRevision = snapshot.revision;
@@ -45,6 +45,8 @@ function controls() {
   folderSidebar.updateActivity();
   const connected = account.sharing && models.length > 0;
   const locked = busy || savingSettings;
+  if (lastLocked && !locked) folderSidebar.restoreActiveSelection();
+  lastLocked = locked;
   $('send').disabled = locked || !connected || !modelID();
   $('send-effort').disabled = $('send').disabled || !$('prompt').value.trim();
   if ($('send-effort').disabled) closeEffortMenu();

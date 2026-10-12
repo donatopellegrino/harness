@@ -48,19 +48,18 @@ export async function readJSON(request) {
 export async function createHarness({ port = 0, directory = join(root, '.data'), auth, fetcher = fetch } = {}) {
   const store = new Store(directory);
   auth ??= new ChatGPTAuth(store);
-  const chats = store.read('chats.json', []);
-  const folders = store.read('folders.json', []);
   const cookie = `harness_session=${randomBytes(32).toString('hex')}`;
   let origin, catalog = [], catalogAt = 0;
   const running = new Map();
+  const inFlightChats = new Map();
+  const findChat = id => inFlightChats.get(id) ?? store.getChat(id);
   let activityRevision = 0;
-  const activity = () => ({ revision: activityRevision, chats: chats.map(chat => ({ id: chat.id, activity: running.get(chat.id) ?? null })) });
-  const finishActivity = id => { if (running.delete(id)) activityRevision++; };
+  const activity = () => ({ revision: activityRevision, chats: store.listChatHeaders().map(chat => ({ id: chat.id, activity: running.get(chat.id) ?? null })) });
+  const finishActivity = id => { if (running.delete(id)) { inFlightChats.delete(id); activityRevision++; } };
   const commitChat = (chat, changes) => {
-    const updated = { ...chat, ...changes };
-    store.write('chats.json', chats.map(item => item === chat ? updated : item));
-    // Publish in-memory state only after the atomic disk write succeeds.
-    Object.assign(chat, changes);
+    // SQLite commits messages, context, and metadata together. Publish only
+    // after that transaction succeeds; patch the latest stored chat header.
+    Object.assign(chat, store.updateChat(chat.id, changes));
   };
 
   async function models() {
@@ -73,7 +72,9 @@ export async function createHarness({ port = 0, directory = join(root, '.data'),
     return catalog;
   }
 
+  let activeRequests = 0, serverClosed = false;
   const server = createServer(async (request, response) => {
+    activeRequests++;
     response.setHeader('Cache-Control', 'no-store');
     response.setHeader('X-Content-Type-Options', 'nosniff');
     response.setHeader('Referrer-Policy', 'no-referrer');
@@ -98,13 +99,13 @@ export async function createHarness({ port = 0, directory = join(root, '.data'),
       if (request.headers.origin && request.headers.origin !== origin) throw fail('Cross-origin requests are not allowed.', 403);
       if (request.method !== 'GET' && request.headers.origin !== origin) throw fail('A same-origin request is required.', 403);
 
-      if (url.pathname === '/api/state' && request.method === 'GET') return json(response, { auth: auth.status(), chats: chats.map(view), folders, activity: activity() });
+      if (url.pathname === '/api/state' && request.method === 'GET') return json(response, { auth: auth.status(), chats: store.listChatsForDisplay().map(view), folders: store.listFolders(), activity: activity() });
       if (url.pathname === '/api/activity' && request.method === 'GET') return json(response, activity());
       if (url.pathname === '/api/account' && request.method === 'GET') return json(response, auth.status());
       if (url.pathname === '/api/models' && request.method === 'GET') return json(response, { models: await models() });
       const metadataMatch = url.pathname.match(/^\/api\/chats\/([\w-]+)\/messages\/(\d+)\/metadata$/);
       if (metadataMatch && request.method === 'GET') {
-        const chat = chats.find(chat => chat.id === metadataMatch[1]);
+        const chat = findChat(metadataMatch[1]);
         const index = Number(metadataMatch[2]);
         if (!chat || !Number.isSafeInteger(index)) throw fail('Message not found.', 404);
         const data = readableMessageMetadata(chat, index);
@@ -122,48 +123,49 @@ export async function createHarness({ port = 0, directory = join(root, '.data'),
       }
       if (url.pathname === '/api/folders' && request.method === 'POST') {
         const body = await readJSON(request);
-        const folder = { id: randomUUID(), name: itemName(body?.name), parentId: folderParent(folders, body?.parentId ?? null) };
-        store.write('folders.json', [...folders, folder]);
-        folders.push(folder); return json(response, folder, 201);
+        const folder = { id: randomUUID(), name: itemName(body?.name), parentId: folderParent(store.listFolders(), body?.parentId ?? null) };
+        store.createFolder(folder); return json(response, folder, 201);
       }
       const folderMatch = url.pathname.match(/^\/api\/folders\/([\w-]+)$/);
       if (folderMatch && request.method === 'PATCH') {
-        const folder = folders.find(item => item.id === folderMatch[1]);
+        const folder = store.listFolders().find(item => item.id === folderMatch[1]);
         if (!folder) throw fail('Folder not found.', 404);
         const body = await readJSON(request);
         if (!body || typeof body !== 'object' || !('name' in body)) throw fail('Provide a folder name.');
         if ('parentId' in body) throw fail('Existing folders cannot be moved.');
         const changes = { name: itemName(body.name) };
-        store.write('folders.json', folders.map(item => item === folder ? { ...folder, ...changes } : item));
-        Object.assign(folder, changes); return json(response, folder);
+        return json(response, store.updateFolder(folder.id, changes));
       }
       const organizationMatch = url.pathname.match(/^\/api\/chats\/([\w-]+)\/organization$/);
       if (organizationMatch && request.method === 'PATCH') {
-        const chat = chats.find(item => item.id === organizationMatch[1]);
+        let chat = findChat(organizationMatch[1]);
         if (!chat) throw fail('Chat not found.', 404);
         const body = await readJSON(request);
         if (!body || typeof body !== 'object' || (!('title' in body) && !('folderId' in body))) throw fail('Provide a name or folder.');
+        // A reply or another rename may start while the body is arriving.
+        // Re-read the current header or share that reply's in-flight object.
+        chat = findChat(organizationMatch[1]);
         // Organization is independent of generation settings and can change during a reply.
         commitChat(chat, { ...('title' in body ? { title: itemName(body.title), titleEdited: true } : {}),
-          ...('folderId' in body ? { folderId: folderParent(folders, body.folderId) } : {}),
+          ...('folderId' in body ? { folderId: folderParent(store.listFolders(), body.folderId) } : {}),
           organizationVersion: (chat.organizationVersion ?? 0) + 1 });
         return json(response, organizationView(chat));
       }
       if (url.pathname === '/api/chats' && request.method === 'POST') {
         const body = request.headers['transfer-encoding'] || Number(request.headers['content-length']) > 0 ? await readJSON(request) : {};
-        const folderId = folderParent(folders, body?.folderId ?? null);
+        const folderId = folderParent(store.listFolders(), body?.folderId ?? null);
         const chat = { id: randomUUID(), folderId, title: 'New chat', model: '', effort: 'default', fast: false, messages: [], input: [] };
-        store.write('chats.json', [chat, ...chats]);
-        chats.unshift(chat); return json(response, view(chat), 201);
+        store.createChat(chat); return json(response, view(chat), 201);
       }
       const match = url.pathname.match(/^\/api\/chats\/([\w-]+)(\/(?:messages|compact))?$/);
       if (!match) throw fail('Not found.', 404);
-      const chat = chats.find(item => item.id === match[1]);
+      const chat = findChat(match[1]);
       if (!chat) throw fail('Chat not found.', 404);
       if (running.has(chat.id)) throw fail('This chat is already generating a reply.', 409);
       const body = await readJSON(request);
       if (!body || typeof body !== 'object') throw fail('Expected a JSON object.');
       if (running.has(chat.id)) throw fail('This chat is already generating a reply.', 409);
+      Object.assign(chat, store.getChat(chat.id));
       const manual = match[2] === '/compact';
       if (!match[2] && request.method === 'PATCH') {
         if (typeof body.model !== 'string' || typeof body.effort !== 'string') throw fail('Choose a model and effort.');
@@ -180,6 +182,7 @@ export async function createHarness({ port = 0, directory = join(root, '.data'),
         } else if (typeof body.text !== 'string' || !body.text.trim() || body.text.length > 32000) throw fail('Enter a message of up to 32,000 characters.');
         // Acquire the chat lock before any network await.
         running.set(chat.id, manual ? 'compacting' : 'replying'); activityRevision++;
+        inFlightChats.set(chat.id, chat);
         const controller = new AbortController();
         response.on('close', () => { if (!response.writableEnded) controller.abort(); });
         const emit = event => { if (!response.destroyed) response.write(`${JSON.stringify(event)}\n`); };
@@ -249,12 +252,16 @@ export async function createHarness({ port = 0, directory = join(root, '.data'),
     } catch (error) {
       if (!response.headersSent) json(response, { error: error.message }, error.status ?? 400);
       else response.end();
+    } finally {
+      activeRequests--;
+      if (serverClosed && activeRequests === 0) store.close();
     }
   });
-  await new Promise((resolve, reject) => {
+  server.once('close', () => { serverClosed = true; if (activeRequests === 0) store.close(); });
+  try { await new Promise((resolve, reject) => {
     server.once('error', reject);
     server.listen(port, '127.0.0.1', resolve);
-  });
+  }); } catch (error) { store.close(); throw error; }
   origin = `http://127.0.0.1:${server.address().port}`;
   return { server, origin };
 }

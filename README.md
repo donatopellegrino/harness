@@ -4,7 +4,7 @@ A minimal local chat harness: Continue with ChatGPT, open separate chats, choose
 
 ## Run
 
-Requires Node.js 22 or later.
+Requires Node.js 22.13 or later (uses the built-in SQLite driver).
 
 ```sh
 npm install
@@ -21,7 +21,7 @@ If OpenAI reports Standard processing despite a Fast request, the completed repl
 
 Beside **Send**, hold **Effort ↑**, drag onto an effort in the menu above it, and release to send using that effort. Releasing outside the choices cancels. The menu uses the selected model's effort options; the chosen effort becomes the chat's current setting. With a keyboard, activate **Effort ↑**, use the arrow keys, and press Enter to send (Escape cancels).
 
-Chats, selections, host identity, and credentials persist in the ignored `.data/` folder. Credentials stay in the Node process and protected local files (directory mode `0700`, files `0600`); they are never returned to browser code. Chat text is rendered as plain text.
+Chats, selections, host identity, and credentials persist in the ignored `.data/storage.sqlite` database. Credentials stay in the Node process and protected local files (directory mode `0700`, files `0600`); they are never returned to browser code. Chat text is rendered as plain text.
 
 Each **You** and **Assistant** label has an **ⓘ** button. Hover or focus it to see message metadata; click or tap to keep the panel open, and close it with **×**, Escape, or a click outside. The summary shows requested and reported settings, token usage, timing, and response identifiers. Scroll through the open sections for all readable saved fields, including HTTP details, annotations, stream event types/sequences, and future provider fields; sections can be collapsed. Metadata loads only when you open the panel. New user messages record their request settings and request start time. Older user messages recover these from their paired reply when available, with the source explicitly labeled. Older messages with no metadata say so; in-progress messages show a pending notice.
 
@@ -29,7 +29,7 @@ The metadata endpoint removes encrypted reasoning/compaction state, binary/media
 
 The Editorial interface uses warm light and dark palettes, a compact sidebar and toolbar, and wider conversation text. The composer grows as you type up to 220 px (or 28% of the viewport on smaller screens), then scrolls internally; it has no manual resize handle. Dropdown arrows have consistent inset spacing.
 
-The sidebar supports nested folders. Select **Top level** or a folder, then use **New folder** or **New chat** to create an item there. Expand/collapse folders with the arrow. Click a folder or chat to select it; click the selected item again to rename it. Existing folders stay in their original parent; only new folders have a parent choice. Chat dialogs also let you change the chat’s folder. You can also use the keyboard to activate the selected item. Working indicators appear beside generating/compacting chats and every ancestor folder, including collapsed folders. They show activity rather than a fabricated completion percentage and refresh from the server while the page is visible. Names and chat locations can be changed while a reply or compaction is running; a custom chat name is preserved when its first reply completes. Existing chats start at the top level. Folder structure is saved in `.data/folders.json`; each chat's name and folder are saved in `.data/chats.json` and survive restarts.
+The sidebar supports nested folders. Select **Top level** or a folder, then use **New folder** or **New chat** to create an item there. Expand/collapse folders with the arrow. Click a folder or chat to select it; click the selected item again to rename it. Existing folders stay in their original parent; only new folders have a parent choice. Chat dialogs also let you change the chat’s folder. You can also use the keyboard to activate the selected item. Working indicators appear beside generating/compacting chats and every ancestor folder, including collapsed folders. They show activity rather than a fabricated completion percentage and refresh from the server while the page is visible. Names and chat locations can be changed while a reply or compaction is running; a custom chat name is preserved when its first reply completes. Existing chats start at the top level. Folder structure and chat names/locations are stored in SQLite and survive restarts.
 
 The sidebar's **Appearance** menu offers **Light**, **Dark**, and **System**. System is the initial setting and follows changes to your device's color scheme automatically. Your selection is saved in this browser for this app address and shared between its open tabs. Appearance remains available during replies and while signed out.
 
@@ -51,7 +51,7 @@ Compaction uses `context_management: [{ type: "compaction", compact_threshold: .
 
 The Responses stream signals the returned compaction item, not an exact start event. Automatic requests show **Compacted context received** when that item arrives, then confirmation after it is saved. Manual requests show progress from the moment you press the button. Compaction can lose details; the complete visible transcript and previously saved response metadata remain in local storage.
 
-In `.data/chats.json`, each new assistant message has a `metadata` object containing the request settings (without duplicate input history), local start/finish timestamps, HTTP status and response headers, the unmodified API response object, and every parsed stream event. This preserves model, reasoning effort, service tier, usage, IDs, provider timestamps, annotations, null values, and unknown future fields. Requested settings and reported values are kept separately. Authorization and cookie headers are excluded; request credentials are never archived. Stream events can make this file substantially larger than the visible chat text.
+In SQLite's message records, each new assistant message has a `metadata` object containing the request settings (without duplicate input history), local start/finish timestamps, HTTP status and response headers, the unmodified API response object, and every parsed stream event. This preserves model, reasoning effort, service tier, usage, IDs, provider timestamps, annotations, null values, and unknown future fields. Requested settings and reported values are kept separately. Authorization and cookie headers are excluded; request credentials are never archived. Stream events can make the database substantially larger than the visible chat text.
 
 The `compactions` array records successful manual and automatic compactions and archives their superseded `previous_input`, including opaque state from older chats. Manual entries include their complete request/response metadata; automatic metadata remains attached to the corresponding assistant reply. The `input` array contains only the active context for replay, while `messages` preserves the transcript. Both survive restarts. Failed manual requests are recorded in `failedAttempts` with `operation: "compaction"`.
 
@@ -72,3 +72,28 @@ Automated tests use simulated OAuth and Responses servers, not your subscription
 - [Preview limitations](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations)
 - [Reasoning effort](https://developers.openai.com/api/docs/guides/reasoning)
 - [Compaction](https://developers.openai.com/api/docs/guides/compaction)
+
+## SQLite storage and migration
+
+All persisted app state uses SQLite. There are no JSON or JSONL storage files after migration. Chat headers and folders have indexed rows; messages, active model context, compaction archives, and failed attempts are ordered individual records. Provider objects remain lossless JSON values inside database columns. Renames update a header, and completed replies commit their messages, context, and metadata in one transaction. The server reads saved chats from SQLite and retains only in-flight chat objects; the current `/api/state` browser payload still includes every chat's visible history.
+
+SQLite uses WAL journaling, full synchronous commits, foreign keys, and a busy timeout. The directory is owner-only (`0700`) and the database is `0600`. Use one backend process for inference; generation locks are process-local. Appearance remains a browser preference.
+
+For an existing installation, stop the backend first, then run:
+
+```sh
+npm run migrate
+npm start
+```
+
+If the running version uses a different storage directory, pass it explicitly:
+
+```sh
+npm run migrate -- /absolute/path/to/.data
+```
+
+The migration reserves the loopback backend port (`PORT`, default `43187`) so an old JSON backend cannot run on that port during conversion. Startup refuses legacy JSON files instead of silently creating an empty replacement store.
+
+Migration imports all existing `.json` files in the data directory in one transaction: chats, folders, sign-in credentials, host identity, and additional diagnostic/probe files. It checks the complete imported data, creates and verifies an owner-only `storage.migration-backup-*.sqlite` snapshot, verifies source hashes, then removes the old JSON files. Extra files are retained in `app_state` under `legacy/<filename>`. A migration manifest makes cleanup retryable after interruption without importing old state over newer SQLite data. Invalid or changed sources are kept and reported.
+
+The migration snapshot includes credentials and should remain private. It is a pre-migration snapshot, not an ongoing backup. Back up a running database using SQLite's backup API; copying only `storage.sqlite` while WAL writes are active can omit pending data. Do not run an older JSON-storage build against the migrated directory: use the SQLite PR version until it is merged.

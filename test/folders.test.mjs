@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHarness } from '../server.mjs';
@@ -11,7 +11,7 @@ async function fixture(t, respond) {
   const directory = mkdtempSync(join(tmpdir(), 'harness-folders-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const store = new Store(directory);
-  store.write('chats.json', [{ id: 'old', title: 'Existing', model: 'gpt-6.1-sol', effort: 'high', messages: [], input: [] }]);
+  store.replaceChats([{ id: 'old', title: 'Existing', model: 'gpt-6.1-sol', effort: 'high', messages: [], input: [] }]);
   const auth = { status: () => ({ connected: false }), accessToken: async () => 'fixture-token' };
   const fetcher = async (url, options) => {
     if (url.endsWith('/models')) return Response.json({ models: [{ slug: 'gpt-6.1-sol', max_context_window: 872000, supported_reasoning_efforts: ['high'] }] });
@@ -71,9 +71,9 @@ test('folder moves, missing parents and invalid names are rejected without chang
   assert.equal((await f.call(`/api/folders/${child.id}`, 'PATCH', { parentId: 10 })).status, 400);
   assert.equal((await fetch(f.app.origin + '/api/folders', { method: 'POST' })).status, 403);
   assert.equal((await fetch(f.app.origin + '/api/chats/old/organization', { method: 'PATCH', headers: { Origin: 'https://other.example' } })).status, 403);
-  assert.equal(f.store.read('folders.json').length, 3);
-  assert.equal(f.store.read('folders.json')[0].parentId, null);
-  assert.equal(f.store.read('chats.json')[0].title, 'Existing');
+  assert.equal(f.store.listFolders().length, 3);
+  assert.equal(f.store.listFolders()[0].parentId, null);
+  assert.equal(f.store.listChats()[0].title, 'Existing');
 });
 
 test('renaming and moving during first generation is preserved by the completed turn and does not alter inference input', async t => {
@@ -92,13 +92,13 @@ test('renaming and moving during first generation is preserved by the completed 
   assert.equal(events.at(-1).chat.title, 'Keep this title'); assert.equal(events.at(-1).chat.folderId, folder.id);
   assert.deepEqual(request.input, [{ role: 'user', content: 'Automatic title?' }]);
   assert.equal(request.folderId, undefined);
-  const saved = f.store.read('chats.json')[0]; assert.equal(saved.title, 'Keep this title'); assert.equal(saved.messages.length, 2);
+  const saved = f.store.listChats()[0]; assert.equal(saved.title, 'Keep this title'); assert.equal(saved.messages.length, 2);
 });
 
 test('a failed folder write does not publish a rename in memory', async t => {
   const f = await fixture(t);
   const folder = await (await f.call('/api/folders', 'POST', { name: 'Original' })).json();
-  const target = join(f.store.directory, 'folders.json'); rmSync(target); mkdirSync(target);
+  f.store.db.exec("CREATE TRIGGER fail_folder_write BEFORE UPDATE ON folders BEGIN SELECT RAISE(ABORT, 'Synthetic write failure'); END;");
   assert.equal((await f.call(`/api/folders/${folder.id}`, 'PATCH', { name: 'Not saved' })).status, 400);
   const state = await (await f.call('/api/state')).json(); assert.equal(state.folders[0].name, 'Original');
 });
@@ -118,7 +118,7 @@ test('move-only edits preserve automatic titles and delayed organization replies
   assert.equal(done.title, 'Generated first title'); assert.equal(done.folderId, folder.id);
   const merged = mergeOrganization(done, delayedMove);
   assert.equal(merged.title, done.title); assert.equal(merged.messages.length, 2); assert.equal(merged.fast, true);
-  assert.equal(f.store.read('chats.json')[0].titleEdited, undefined);
+  assert.equal(f.store.listChats()[0].titleEdited, undefined);
   // The dialog was opened before the first response arrived. Moving it after
   // completion must not submit its stale title as an intentional rename.
   const afterDoneChanges = organizationChanges('chat', original, original.title, null);
@@ -126,7 +126,7 @@ test('move-only edits preserve automatic titles and delayed organization replies
   const moveOut = organizationChanges('chat', { ...original, folderId: folder.id }, original.title, null);
   assert.deepEqual(moveOut, { folderId: null });
   await f.call('/api/chats/old/organization', 'PATCH', moveOut);
-  assert.equal(f.store.read('chats.json')[0].title, 'Generated first title');
+  assert.equal(f.store.listChats()[0].title, 'Generated first title');
 });
 
 test('organization merges preserve unrelated settings, newer conversation state and newer names in either response order', () => {
@@ -157,4 +157,39 @@ test('move choices omit a folder and descendants; out-of-order organization and 
     const merged = mergeChat(current, incoming); assert.equal(merged.title, 'New name'); assert.equal(merged.folderId, 'b');
     assert.equal(merged.messages.length, 1); assert.equal(merged.compactionCount, 1);
   }
+});
+
+test('a delayed rename body uses the latest organization version and shares a reply that started meanwhile', async t => {
+  const { request } = await import('node:http');
+  let release;
+  const f = await fixture(t, () => new Promise(resolve => { release = () => resolve(completed()); }));
+  const page = await fetch(f.app.origin); await page.text();
+  const cookie = page.headers.get('set-cookie').split(';')[0];
+  let bodyReady;
+  const ready = new Promise(resolve => { bodyReady = resolve; });
+  f.app.server.on('request', request => { if (request.headers['x-fixture'] === 'slow-rename') bodyReady(); });
+  const body = JSON.stringify({ title: 'Delayed custom name' });
+  let slowRequest;
+  const slowReply = new Promise((resolve, reject) => {
+    slowRequest = request(f.app.origin + '/api/chats/old/organization', { method: 'PATCH', headers: {
+      Cookie: cookie, Origin: f.app.origin, 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body), 'X-Fixture': 'slow-rename',
+    } }, response => {
+      let text = ''; response.setEncoding('utf8'); response.on('data', value => { text += value; });
+      response.on('end', () => resolve({ status: response.statusCode, body: JSON.parse(text) })); response.on('error', reject);
+    });
+    slowRequest.on('error', reject);
+    slowRequest.write(body.slice(0, -1));
+  });
+  await ready;
+  const fast = await (await f.call('/api/chats/old/organization', 'PATCH', { title: 'Earlier name' })).json();
+  assert.equal(fast.organizationVersion, 1);
+  const generation = await f.call('/api/chats/old/messages', 'POST', { text: 'Automatic title candidate' });
+  slowRequest.end(body.slice(-1));
+  const renamed = await slowReply;
+  assert.equal(renamed.status, 200); assert.equal(renamed.body.organizationVersion, 2);
+  release();
+  const events = (await generation.text()).trim().split('\n').map(JSON.parse);
+  assert.equal(events.at(-1).type, 'done');
+  assert.equal(events.at(-1).chat.title, 'Delayed custom name');
+  assert.equal(f.store.getChat('old').title, 'Delayed custom name');
 });

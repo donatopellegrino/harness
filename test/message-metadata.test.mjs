@@ -75,7 +75,7 @@ test('message-info route is session protected, scoped to one message, lazy and s
   const directory = mkdtempSync(join(tmpdir(), 'harness-message-info-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const store = new Store(directory);
-  store.write('chats.json', [{ id: 'chat', title: 'Saved', model: 'other-model', effort: 'low',
+  store.replaceChats([{ id: 'chat', title: 'Saved', model: 'other-model', effort: 'low',
     // Active context has been compacted; transcript metadata remains available.
     input: [{ type: 'compaction', encrypted_content: 'private-active-state' }],
     messages: [{ role: 'user', text: 'Question' }, { role: 'assistant', text: 'Reply', metadata: metadata() }] }]);
@@ -100,7 +100,7 @@ test('message-info route is session protected, scoped to one message, lazy and s
     assert.equal(user.metadata.request.model, 'gpt-6.1-sol');
     assert.equal((await fetch(`${app.origin}/api/chats/chat/messages/9/metadata`, { headers })).status, 404);
     assert.equal((await fetch(`${app.origin}/api/chats/unknown/messages/0/metadata`, { headers })).status, 404);
-    assert.deepEqual(store.read('chats.json')[0].messages[1].metadata, metadata());
+    assert.deepEqual(store.listChats()[0].messages[1].metadata, metadata());
     app.server.closeAllConnections(); await new Promise(resolve => app.server.close(resolve));
   }
 });

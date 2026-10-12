@@ -14,7 +14,7 @@ test('activity follows reply and compaction lifecycle, clears after errors, and 
   const directory = mkdtempSync(join(tmpdir(), 'harness-activity-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const store = new Store(directory);
-  store.write('chats.json', [{ id: 'chat', title: 'Existing', model: 'gpt-6.1-sol', effort: 'high', input: [{ role: 'user', content: 'Remember this' }, answer], messages: [{ role: 'user', text: 'Remember this' }, { role: 'assistant', text: 'Reply' }] }]);
+  store.replaceChats([{ id: 'chat', title: 'Existing', model: 'gpt-6.1-sol', effort: 'high', input: [{ role: 'user', content: 'Remember this' }, answer], messages: [{ role: 'user', text: 'Remember this' }, { role: 'assistant', text: 'Reply' }] }]);
   let release;
   const app = await createHarness({ directory, auth: { status: () => ({}), accessToken: async () => 'fixture-token' }, fetcher: async url => {
     if (url.endsWith('/models')) return Response.json({ models: [{ slug: 'gpt-6.1-sol', supported_reasoning_efforts: ['high'] }] });
@@ -39,7 +39,7 @@ test('activity follows reply and compaction lifecycle, clears after errors, and 
     assert.equal(events.at(-1).type, mode === 'failure' ? 'error' : 'done');
     const after = await (await call('/api/activity')).json();
     assert.equal(after.chats[0].activity, null); assert.ok(after.revision > status.revision); revision = after.revision;
-    assert.equal(store.read('chats.json')[0].activity, undefined);
+    assert.equal(store.listChats()[0].activity, undefined);
   }
 });
 

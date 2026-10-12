@@ -131,9 +131,10 @@ export function createFolders({ state, api, onOrganization, onFolder, onSelectCh
         const row = document.createElement('div'); row.className = 'sidebar-row';
         const open = button(chat.title, 'chat-open', () => {
           if (selection?.kind === 'chat' && selection.id === chat.id) { edit('chat', chat); return; }
-          const previous = { selected, selection };
           selected = chat.folderId ?? null; selection = { kind: 'chat', id: chat.id };
-          if (onSelectChat(chat.id) === false) { selected = previous.selected; selection = previous.selection; }
+          // Selecting an item for editing must also work while the active
+          // conversation is locked. Keep that conversation and its draft intact.
+          if (onSelectChat(chat.id) === false) { render(); afterRender(); }
         });
         open.dataset.chatOpen = ''; open.dataset.chatId = chat.id; open.title = `${chat.title} · Click again to rename or move`; open.setAttribute('aria-current', String(selection?.kind === 'chat' && chat.id === selection.id));
         row.append(open, indicator('chat', chat.id)); container.append(row);

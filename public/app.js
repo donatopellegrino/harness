@@ -59,7 +59,6 @@ function controls() {
   $('send').textContent = busy && !compacting ? 'Replying…' : 'Send';
   $('compact').disabled = locked || !connected || !modelID() || !active()?.messages.length;
   $('compact').textContent = compacting ? 'Compacting…' : 'Compact context';
-  for (const button of $('chats').querySelectorAll('[data-chat-open]')) button.disabled = locked && button.dataset.chatId !== activeId;
   renderContext();
 }
 function renderContext() {
@@ -333,6 +332,7 @@ $('composer').onsubmit = safely(async event => {
   try {
     await saveSettings();
     $('prompt').value = '';
+    resizeComposer($('prompt'));
     if (!active().messages.length) $('messages').replaceChildren();
     message('user', text); const reply = message('assistant', 'Thinking…');
     const response = await fetch(`/api/chats/${activeId}/messages`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }) });

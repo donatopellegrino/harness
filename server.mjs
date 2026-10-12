@@ -14,6 +14,8 @@ const assets = new Map([
   ['/', ['index.html', 'text/html']], ['/app.js', ['app.js', 'text/javascript']], ['/style.css', ['style.css', 'text/css']],
   ['/account-sync.js', ['account-sync.js', 'text/javascript']],
   ['/compaction-sync.js', ['compaction-sync.js', 'text/javascript']],
+  ['/composer.js', ['composer.js', 'text/javascript']],
+  ['/activity.js', ['activity.js', 'text/javascript']],
   ['/folders.js', ['folders.js', 'text/javascript']],
   ['/message-info.js', ['message-info.js', 'text/javascript']],
   ['/theme.js', ['theme.js', 'text/javascript']],
@@ -50,7 +52,10 @@ export async function createHarness({ port = 0, directory = join(root, '.data'),
   const folders = store.read('folders.json', []);
   const cookie = `harness_session=${randomBytes(32).toString('hex')}`;
   let origin, catalog = [], catalogAt = 0;
-  const running = new Set();
+  const running = new Map();
+  let activityRevision = 0;
+  const activity = () => ({ revision: activityRevision, chats: chats.map(chat => ({ id: chat.id, activity: running.get(chat.id) ?? null })) });
+  const finishActivity = id => { if (running.delete(id)) activityRevision++; };
   const commitChat = (chat, changes) => {
     const updated = { ...chat, ...changes };
     store.write('chats.json', chats.map(item => item === chat ? updated : item));
@@ -93,7 +98,8 @@ export async function createHarness({ port = 0, directory = join(root, '.data'),
       if (request.headers.origin && request.headers.origin !== origin) throw fail('Cross-origin requests are not allowed.', 403);
       if (request.method !== 'GET' && request.headers.origin !== origin) throw fail('A same-origin request is required.', 403);
 
-      if (url.pathname === '/api/state' && request.method === 'GET') return json(response, { auth: auth.status(), chats: chats.map(view), folders });
+      if (url.pathname === '/api/state' && request.method === 'GET') return json(response, { auth: auth.status(), chats: chats.map(view), folders, activity: activity() });
+      if (url.pathname === '/api/activity' && request.method === 'GET') return json(response, activity());
       if (url.pathname === '/api/account' && request.method === 'GET') return json(response, auth.status());
       if (url.pathname === '/api/models' && request.method === 'GET') return json(response, { models: await models() });
       const metadataMatch = url.pathname.match(/^\/api\/chats\/([\w-]+)\/messages\/(\d+)\/metadata$/);
@@ -125,9 +131,9 @@ export async function createHarness({ port = 0, directory = join(root, '.data'),
         const folder = folders.find(item => item.id === folderMatch[1]);
         if (!folder) throw fail('Folder not found.', 404);
         const body = await readJSON(request);
-        if (!body || typeof body !== 'object' || (!('name' in body) && !('parentId' in body))) throw fail('Provide a name or parent folder.');
-        const changes = { ...('name' in body ? { name: itemName(body.name) } : {}),
-          ...('parentId' in body ? { parentId: folderParent(folders, body.parentId, folder.id) } : {}) };
+        if (!body || typeof body !== 'object' || !('name' in body)) throw fail('Provide a folder name.');
+        if ('parentId' in body) throw fail('Existing folders cannot be moved.');
+        const changes = { name: itemName(body.name) };
         store.write('folders.json', folders.map(item => item === folder ? { ...folder, ...changes } : item));
         Object.assign(folder, changes); return json(response, folder);
       }
@@ -173,7 +179,7 @@ export async function createHarness({ port = 0, directory = join(root, '.data'),
           if (!chat.input.length) throw fail('Send a message before compacting this chat.');
         } else if (typeof body.text !== 'string' || !body.text.trim() || body.text.length > 32000) throw fail('Enter a message of up to 32,000 characters.');
         // Acquire the chat lock before any network await.
-        running.add(chat.id);
+        running.set(chat.id, manual ? 'compacting' : 'replying'); activityRevision++;
         const controller = new AbortController();
         response.on('close', () => { if (!response.writableEnded) controller.abort(); });
         const emit = event => { if (!response.destroyed) response.write(`${JSON.stringify(event)}\n`); };
@@ -230,12 +236,13 @@ export async function createHarness({ port = 0, directory = join(root, '.data'),
             title: chat.messages.length === 0 && !chat.titleEdited ? user.content.replace(/\s+/g, ' ').slice(0, 60) : chat.title,
           });
           if (checkpoint) emit({ type: 'status', message: `${manual ? 'Context compacted' : 'Context automatically compacted'}. Chat history is preserved.` });
+          finishActivity(chat.id);
           emit({ type: 'done', chat: view(chat) }); response.end();
         } catch (error) {
           const diagnosticError = saveFailedAttempt(error.message);
           if (response.headersSent) { emit({ type: 'error', message: error.message + (diagnosticError ? ` (${diagnosticError})` : '') }); response.end(); }
           else throw error;
-        } finally { running.delete(chat.id); }
+        } finally { finishActivity(chat.id); }
         return;
       }
       throw fail('Method not allowed.', 405);

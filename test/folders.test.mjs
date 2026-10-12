@@ -44,17 +44,18 @@ test('nested folders, chat moves and renames persist across restart; old chats s
   assert.equal(nested.folderId, child.id);
   assert.equal((await f.call(`/api/folders/${parent.id}`, 'PATCH', { name: 'Work' })).status, 200);
   assert.equal((await f.call('/api/chats/old/organization', 'PATCH', { title: 'My name', folderId: child.id })).status, 200);
-  assert.equal((await f.call(`/api/folders/${child.id}`, 'PATCH', { parentId: null })).status, 200);
+  assert.equal((await f.call(`/api/folders/${child.id}`, 'PATCH', { name: 'Study', parentId: null })).status, 400);
   assert.equal((await f.call(`/api/chats/${nested.id}/organization`, 'PATCH', { folderId: null })).status, 200);
   f.app.server.closeAllConnections(); await new Promise(resolve => f.app.server.close(resolve));
   const reopened = await f.connect(); state = await (await reopened.call('/api/state')).json();
   assert.equal(state.folders.find(folder => folder.id === parent.id).name, 'Work');
-  assert.equal(state.folders.find(folder => folder.id === child.id).parentId, null);
+  assert.equal(state.folders.find(folder => folder.id === child.id).parentId, parent.id);
+  assert.equal(state.folders.find(folder => folder.id === child.id).name, 'Research');
   const old = state.chats.find(chat => chat.id === 'old'); assert.equal(old.title, 'My name'); assert.equal(old.folderId, child.id);
   assert.equal(state.chats.find(chat => chat.id === nested.id).folderId, null);
 });
 
-test('cycles, missing parents and invalid names are rejected without changing structure; routes require session and origin', async t => {
+test('folder moves, missing parents and invalid names are rejected without changing structure; routes require session and origin', async t => {
   const f = await fixture(t);
   const parent = await (await f.call('/api/folders', 'POST', { name: 'A' })).json();
   const child = await (await f.call('/api/folders', 'POST', { name: 'B', parentId: parent.id })).json();
@@ -141,6 +142,8 @@ test('organization merges preserve unrelated settings, newer conversation state 
   const beforeReply = { ...staleSnapshot, title: 'New chat' }, afterReply = { ...current, title: 'Generated title', folderId: 'folder', organizationVersion: 1 };
   for (const [a, b] of [[beforeReply, afterReply], [afterReply, beforeReply]]) assert.equal(mergeChat(a, b).title, 'Generated title');
   assert.deepEqual(organizationChanges('folder', { name: 'Same', parentId: null }, 'Renamed', null), { name: 'Renamed' });
+  assert.deepEqual(organizationChanges('folder', { name: 'Same', parentId: 'original' }, 'Renamed', 'other'), { name: 'Renamed' });
+  assert.deepEqual(organizationChanges('folder', { name: 'Same', parentId: 'original' }, 'Same', 'other'), {});
   assert.deepEqual(organizationChanges('chat', current, 'Renamed', null), { title: 'Renamed' });
 });
 

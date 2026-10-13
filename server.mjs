@@ -15,6 +15,7 @@ const assets = new Map([
   ['/account-sync.js', ['account-sync.js', 'text/javascript']],
   ['/compaction-sync.js', ['compaction-sync.js', 'text/javascript']],
   ['/composer.js', ['composer.js', 'text/javascript']],
+  ['/scroll-follow.js', ['scroll-follow.js', 'text/javascript']],
   ['/activity.js', ['activity.js', 'text/javascript']],
   ['/folders.js', ['folders.js', 'text/javascript']],
   ['/message-info.js', ['message-info.js', 'text/javascript']],

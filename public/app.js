@@ -112,12 +112,34 @@ function renderMessages({ preserveScroll = false } = {}) {
   const draw = () => {
     $('messages').replaceChildren();
     const history = active()?.messages ?? [];
+    const markers = new Map();
+    for (const marker of active()?.compactionMarkers ?? []) {
+      const boundary = marker.afterMessageCount ?? 0;
+      if (!markers.has(boundary)) markers.set(boundary, []);
+      markers.get(boundary).push(marker);
+    }
+    const mark = boundary => {
+      for (const marker of markers.get(boundary) ?? []) {
+        const row = document.createElement('div'); row.className = 'compaction-marker'; row.setAttribute('role', 'note');
+        const label = document.createElement('span');
+        label.textContent = marker.mode === 'automatic' ? 'Context compacted automatically' : marker.mode === 'manual' ? 'Context compacted manually' : 'Context compacted';
+        if (marker.afterMessageCount === null) label.textContent += ' · position not recorded';
+        row.append(label);
+        if (marker.completedAt) {
+          const date = new Date(marker.completedAt), time = document.createElement('time');
+          time.dateTime = date.toISOString(); time.textContent = date.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'medium' });
+          time.title = `Completed ${date.toLocaleString()}`; row.append(time);
+        }
+        $('messages').append(row);
+      }
+    };
+    mark(0);
     if (!history.length) {
       const empty = document.createElement('div'); empty.className = 'empty';
       const title = document.createElement('h1'); title.textContent = 'A simple place to chat.';
       const subtitle = document.createElement('p'); subtitle.textContent = account.sharing ? 'Choose a model and send a message.' : 'Continue with ChatGPT to get started.';
       empty.append(title, subtitle); $('messages').append(empty);
-    } else history.forEach((item, index) => message(item.role, item.text, { chatId: activeId, index }));
+    } else history.forEach((item, index) => { message(item.role, item.text, { chatId: activeId, index }); mark(index + 1); });
   };
   if (preserveScroll) messageScroll.update(draw); else messageScroll.reset(draw);
 }
@@ -232,6 +254,7 @@ $('compact').onclick = safely(async () => {
     const response = await fetch(`/api/chats/${chatId}/compact`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
     await readEvents(response, item => { if (item.type === 'done') { replaceChat(item.chat); done = true; } });
     if (!done) throw new Error('Compaction completion could not be confirmed.');
+    renderMessages({ preserveScroll: true });
   } catch (error) {
     showStatus('');
     if (!requested) throw error;

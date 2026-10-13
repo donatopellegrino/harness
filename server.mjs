@@ -7,6 +7,7 @@ import { ChatGPTAuth } from './lib/auth.mjs';
 import { Store } from './lib/store.mjs';
 import { normalizeModels, resolveModel, responseText, streamReply, latestUsage, autoCompactThreshold, compactedInput } from './lib/responses.mjs';
 import { readableMessageMetadata } from './lib/message-metadata.mjs';
+import { compactionMarkers } from './lib/compaction-markers.mjs';
 import { itemName, folderParent } from './lib/folders.mjs';
 
 const root = dirname(fileURLToPath(import.meta.url));
@@ -32,6 +33,7 @@ const view = chat => ({ ...organizationView(chat), model: chat.model, effort: ch
   contextUsage: chat.contextUsageSource === 'compaction' ? chat.contextUsage : latestUsage(chat.messages),
   contextUsageSource: chat.contextUsageSource === 'compaction' ? 'compaction' : 'reply',
   compactionCount: chat.compactions?.length ?? 0,
+  compactionMarkers: compactionMarkers(chat.messages, chat.compactions),
   messages: chat.messages.map(({ role, text }) => ({ role, text })) });
 
 export async function readJSON(request) {
@@ -223,6 +225,7 @@ export async function createHarness({ port = 0, directory = join(root, '.data'),
           const compactions = checkpoint ? [...(chat.compactions ?? []), {
             mode: manual ? 'manual' : 'automatic', model: chat.model, threshold,
             completed_at: metadata.finished_at, response_id: metadata.response?.id,
+            after_message_count: chat.messages.length + (manual ? 0 : 2),
             previous_input: chat.input, // Archive superseded opaque state as well as visible messages.
             ...(manual ? { metadata } : {}), // Automatic metadata is already saved with the reply.
           }] : chat.compactions;

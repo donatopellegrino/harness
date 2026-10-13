@@ -144,6 +144,9 @@ header select { max-width: 230px; }
 .select-wrap select { appearance: none; -webkit-appearance: none; width: 100%; padding-right: 32px; }
 .select-wrap::after { content: ''; position: absolute; right: 12px; top: 50%; width: 6px; height: 6px; margin-top: -4px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(45deg); pointer-events: none; }
 #messages { padding: 10px 0 0; overflow-anchor: none; }
+.compaction-marker { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 6px 12px; padding: 12px 8px; color: var(--muted); font-size: 12px; border-bottom: 1px solid var(--divider); }
+.compaction-marker span { color: var(--accent); }
+.compaction-marker time { font-size: 11px; }
 .message { display: grid; grid-template-columns: 86px minmax(0, 1fr); gap: 10px; margin-bottom: 0; padding: 12px 0; border-bottom: 1px solid var(--divider); }
 .role { align-self: start; flex-wrap: nowrap; gap: 5px; margin: 0; padding-top: 3px; font-weight: 500; font-size: 12px; }
 .content { font-size: 15px; line-height: 1.55; }

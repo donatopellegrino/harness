@@ -21,7 +21,7 @@ async function fixture(t, respond, chat = seed()) {
   const directory = mkdtempSync(join(tmpdir(), 'harness-compaction-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const store = new Store(directory), sent = [];
-  store.write('chats.json', [chat]);
+  store.replaceChats([chat]);
   const fetcher = async (url, options) => {
     if (url.endsWith('/models')) return Response.json({ models: [
       { slug: 'gpt-6.1-sol', supported_reasoning_efforts: ['high'], context_window: 272000, max_context_window: 872000 },
@@ -63,7 +63,7 @@ test('automatic checkpoints prune replay, manual compaction preserves transcript
   assert.ok(result.some(item => item.type === 'status' && /automatically compacted/.test(item.message)));
   assert.equal(f.sent[0].context_management[0].compact_threshold, 348800);
   assert.equal(f.sent[0].instructions, undefined);
-  let saved = f.store.read('chats.json')[0];
+  let saved = f.store.listChats()[0];
   assert.equal(saved.input[0].id, 'automatic');
   assert.equal(saved.input.length, 3);
   assert.equal(saved.messages.length, 4);
@@ -80,7 +80,7 @@ test('automatic checkpoints prune replay, manual compaction preserves transcript
   assert.equal(f.sent[1].context_management[0].compact_threshold, 1000);
   assert.equal(f.sent[1].input[0].id, 'automatic');
   assert.equal(f.sent[1].input.some(item => item.role === 'user'), false);
-  saved = f.store.read('chats.json')[0];
+  saved = f.store.listChats()[0];
   assert.deepEqual(saved.messages, transcript);
   assert.deepEqual(saved.input, [checkpoint('manual')]);
   assert.equal(saved.compactions.length, 2);
@@ -98,7 +98,7 @@ test('automatic checkpoints prune replay, manual compaction preserves transcript
   mode = 'failure';
   result = await events(await f.call('/api/chats/chat/compact', 'POST', {}));
   assert.equal(result.at(-1).type, 'error');
-  saved = f.store.read('chats.json')[0];
+  saved = f.store.listChats()[0];
   assert.deepEqual(saved.input, [checkpoint('manual')]);
   assert.deepEqual(saved.messages, transcript);
   assert.equal(saved.compactions.length, 2);
@@ -112,7 +112,7 @@ test('automatic checkpoints prune replay, manual compaction preserves transcript
   mode = 'continue';
   await events(await restarted.call('/api/chats/chat/messages', 'POST', { text: 'Continue' }));
   assert.deepEqual(f.sent.at(-1).input, [checkpoint('manual'), { role: 'user', content: 'Continue' }]);
-  saved = f.store.read('chats.json')[0];
+  saved = f.store.listChats()[0];
   assert.equal(saved.messages.length, 6);
   assert.equal(saved.contextUsage, null);
   assert.equal(saved.input[0].id, 'manual');
@@ -130,7 +130,7 @@ test('manual compaction accepts checkpoint-only output and refuses missing, malf
     const before = seed();
     const f = await fixture(t, () => sse(scenario.reply), before);
     const result = await events(await f.call('/api/chats/chat/compact', 'POST', {}));
-    const saved = f.store.read('chats.json')[0];
+    const saved = f.store.listChats()[0];
     assert.deepEqual(saved.messages, before.messages);
     if (scenario.succeeds) {
       assert.equal(result.at(-1).type, 'done');
@@ -165,17 +165,17 @@ test('manual compaction locks chat edits, duplicate requests and sign-out until 
 
 test('compaction disk failure keeps the old checkpoint in memory and on disk', async t => {
   const f = await fixture(t, () => sse([complete([checkpoint('new')])]));
-  const write = Store.prototype.write;
-  t.after(() => { Store.prototype.write = write; });
+  const write = Store.prototype.updateChat;
+  t.after(() => { Store.prototype.updateChat = write; });
   let fail = true;
-  Store.prototype.write = function(name, value) {
-    if (this.directory === f.store.directory && name === 'chats.json' && fail) { fail = false; throw new Error('Disk full'); }
-    return write.call(this, name, value);
+  Store.prototype.updateChat = function(id, changes) {
+    if (this.directory === f.store.directory && fail) { fail = false; throw new Error('Disk full'); }
+    return write.call(this, id, changes);
   };
   const result = await events(await f.call('/api/chats/chat/compact', 'POST', {}));
   assert.equal(result.at(-1).type, 'error');
   assert.match(result.at(-1).message, /Disk full/);
-  assert.deepEqual(f.store.read('chats.json')[0].input, seed().input);
+  assert.deepEqual(f.store.listChats()[0].input, seed().input);
   const state = await (await f.call('/api/state')).json();
   assert.equal(state.chats[0].compactionCount, 0);
   assert.deepEqual(state.chats[0].messages, seed().messages);
@@ -217,7 +217,7 @@ test('closing a manual compaction stream cancels inference and preserves the old
   await reader.cancel(); await aborted;
   const state = await (await f.call('/api/state')).json();
   assert.equal(state.chats[0].compactionCount, 0);
-  const saved = f.store.read('chats.json')[0];
+  const saved = f.store.listChats()[0];
   assert.deepEqual(saved.input, seed().input);
   assert.deepEqual(saved.messages, seed().messages);
   assert.equal(saved.failedAttempts[0].operation, 'compaction');
@@ -252,7 +252,7 @@ test('a lost manual completion acknowledgment is reconciled from durable state',
     assert.equal(displayed.contextUsageSource, 'compaction');
     assert.equal(displayed.contextUsage.totalTokens, 100);
     assert.deepEqual(displayed.messages, seed().messages);
-    assert.deepEqual(f.store.read('chats.json')[0].input, [checkpoint('saved-before-disconnect')]);
+    assert.deepEqual(f.store.listChats()[0].input, [checkpoint('saved-before-disconnect')]);
   });
 });
 

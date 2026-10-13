@@ -59,7 +59,7 @@ test('dynamic registration, PKCE, signed identity, scoped access, protected pers
   assert.equal(f.lastGrant().get('resource'), 'https://api.openai.com/v1');
   assert.equal(await f.auth.accessToken(), 'access-test');
   assert.deepEqual(f.auth.status(), { connected: true, sharing: true, email: 'test@example.com' });
-  assert.equal(statSync(join(f.store.directory, 'auth.json')).mode & 0o777, 0o600);
+  assert.equal(statSync(f.store.path).mode & 0o777, 0o600);
   const again = new URL(await f.auth.begin('http://127.0.0.1:22222'));
   assert.equal(again.searchParams.get('client_id'), 'oaiapp_test');
   assert.equal(again.searchParams.get('agent_name_hint'), null);
@@ -106,8 +106,8 @@ test('concurrent token refresh is serialized and logout revokes the replacement'
   assert.deepEqual(await f.auth.logout(), { revoked: true });
   assert.equal(f.revokedToken(), 'refresh-new');
   assert.equal(f.auth.status().connected, false);
-  assert.equal(f.store.read('auth.json').refresh_token, undefined);
-  assert.equal(f.store.read('auth.json').client_id, 'oaiapp_test');
+  assert.equal(f.store.getState('auth').refresh_token, undefined);
+  assert.equal(f.store.getState('auth').client_id, 'oaiapp_test');
 });
 
 function sse(events, headers = {}) {
@@ -299,7 +299,7 @@ test('HTTP chat flow: model/effort, full history, isolation, failed-turn rollbac
   assert.equal((await call(`/api/chats/${second.id}`, 'PATCH', { model: '../invalid', effort: 'default' })).status, 400);
   events = (await (await call(`/api/chats/${first.id}/messages`, 'POST', { text: 'fail' })).text()).trim().split('\n').map(JSON.parse);
   assert.equal(events.at(-1).type, 'error');
-  const saved = store.read('chats.json');
+  const saved = store.listChats();
   const savedFirst = saved.find(chat => chat.id === first.id);
   assert.equal(savedFirst.messages.length, 4);
   assert.equal(savedFirst.input.at(-1).type, 'message');
@@ -320,7 +320,7 @@ test('HTTP chat flow: model/effort, full history, isolation, failed-turn rollbac
   assert.equal(metadata.events.at(-1).response.id, 'resp_metadata');
   assert.equal(savedFirst.failedAttempts.length, 1);
   assert.equal(savedFirst.failedAttempts[0].metadata.response.error.code, 'usage_limit');
-  assert.equal(statSync(join(store.directory, 'chats.json')).mode & 0o777, 0o600);
+  assert.equal(statSync(store.path).mode & 0o777, 0o600);
   const serialized = JSON.stringify(saved);
   for (const secret of ['private-token', 'secret-cookie', 'secret-header']) assert.equal(serialized.includes(secret), false);
   // Metadata is archived locally, not sent back as model input or ordinary UI state.
@@ -346,7 +346,7 @@ test('HTTP chat flow: model/effort, full history, isolation, failed-turn rollbac
     method: 'POST', headers: { Cookie: newCookie, Origin: restarted.origin, 'Content-Type': 'application/json' },
     body: JSON.stringify({ text: 'Continue after restart' }),
   }).then(response => response.text());
-  const afterRestart = store.read('chats.json').find(chat => chat.id === first.id);
+  const afterRestart = store.listChats().find(chat => chat.id === first.id);
   assert.deepEqual(afterRestart.messages[1].metadata, metadata);
   assert.equal(afterRestart.messages.at(-1).metadata.response.id, 'resp_metadata');
   assert.equal(afterRestart.failedAttempts[0].metadata.response.id, 'resp_failed');
@@ -355,7 +355,7 @@ test('HTTP chat flow: model/effort, full history, isolation, failed-turn rollbac
 
 test('client cancellation archives received metadata without committing a partial turn', async t => {
   const store = tempStore(t);
-  store.write('chats.json', [{ id: 'cancel-test', title: 'New chat', model: 'test', effort: 'default', messages: [], input: [] }]);
+  store.replaceChats([{ id: 'cancel-test', title: 'New chat', model: 'test', effort: 'default', messages: [], input: [] }]);
   const auth = { status: () => ({ connected: true, sharing: true }), accessToken: async () => 'secret' };
   const app = await createHarness({ directory: store.directory, auth, fetcher: async (url, options) => {
     if (url.endsWith('/models')) return Response.json({ models: [{ slug: 'test' }] });
@@ -377,7 +377,7 @@ test('client cancellation archives received metadata without committing a partia
   // Wait only for this local server's close/abort handler to persist the record.
   let saved;
   for (let i = 0; i < 100; i++) {
-    saved = store.read('chats.json')[0];
+    saved = store.listChats()[0];
     if (saved.failedAttempts?.length) break;
     await new Promise(resolve => setTimeout(resolve, 10));
   }
@@ -393,7 +393,7 @@ test('client cancellation archives received metadata without committing a partia
 
 test('existing chats without a speed setting use Standard mode', async t => {
   const store = tempStore(t);
-  store.write('chats.json', [{ id: 'legacy', title: 'Old chat', model: 'gpt-6-luna', effort: 'high', messages: [], input: [] }]);
+  store.replaceChats([{ id: 'legacy', title: 'Old chat', model: 'gpt-6-luna', effort: 'high', messages: [], input: [] }]);
   const app = await createHarness({ directory: store.directory, auth: { status: () => ({ connected: false }) } });
   t.after(() => { app.server.close(); app.server.closeAllConnections(); });
   const cookie = (await fetch(app.origin)).headers.get('set-cookie').split(';')[0];
@@ -459,11 +459,11 @@ test('JSON requests preserve Unicode split across arbitrary byte chunks and enfo
 });
 
 test('a failed disk commit does not publish a turn or contaminate retries', async t => {
-  const write = Store.prototype.write;
-  t.after(() => { Store.prototype.write = write; });
+  const write = Store.prototype.updateChat;
+  t.after(() => { Store.prototype.updateChat = write; });
   for (const failures of [1, 2]) {
     const store = tempStore(t), sent = [];
-    store.write('chats.json', [{ id: 'disk-test', title: 'New chat', model: 'test', effort: 'default', messages: [], input: [] }]);
+    store.replaceChats([{ id: 'disk-test', title: 'New chat', model: 'test', effort: 'default', messages: [], input: [] }]);
     const app = await createHarness({ directory: store.directory,
       auth: { status: () => ({ connected: true, sharing: true }), accessToken: async () => 'fixture' },
       fetcher: async (url, options) => {
@@ -477,13 +477,13 @@ test('a failed disk commit does not publish a turn or contaminate retries', asyn
     const call = (path, method = 'GET', body) => fetch(app.origin + path, { method,
       headers: { Cookie: cookie, Origin: app.origin, 'Content-Type': 'application/json' }, ...(body ? { body: JSON.stringify(body) } : {}) });
     let remaining = failures;
-    Store.prototype.write = function(name, value) {
-      if (this.directory === store.directory && name === 'chats.json' && remaining > 0) {
+    Store.prototype.updateChat = function(id, changes) {
+      if (this.directory === store.directory && remaining > 0) {
         const message = remaining === failures ? 'turn-write-failed' : 'diagnostic-write-failed';
         remaining--;
         throw Object.assign(new Error(message), { code: 'EIO' });
       }
-      return write.call(this, name, value);
+      return write.call(this, id, changes);
     };
     const events = (await (await call('/api/chats/disk-test/messages', 'POST', { text: 'First try' })).text()).trim().split('\n').map(JSON.parse);
     assert.equal(events.at(-1).type, 'error');
@@ -491,12 +491,12 @@ test('a failed disk commit does not publish a turn or contaminate retries', asyn
     const inMemory = (await (await call('/api/state')).json()).chats[0];
     assert.deepEqual(inMemory.messages, []);
     assert.equal(inMemory.title, 'New chat');
-    const saved = store.read('chats.json')[0];
+    const saved = store.listChats()[0];
     assert.deepEqual(saved.input, []);
     assert.deepEqual(saved.messages, []);
     await (await call('/api/chats/disk-test/messages', 'POST', { text: 'Retry' })).text();
     assert.deepEqual(sent[1].input, [{ role: 'user', content: 'Retry' }]);
-    assert.equal(store.read('chats.json')[0].messages.length, 2);
-    Store.prototype.write = write;
+    assert.equal(store.listChats()[0].messages.length, 2);
+    Store.prototype.updateChat = write;
   }
 });

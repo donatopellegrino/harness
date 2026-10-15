@@ -116,7 +116,13 @@ test('chat updates are transactional across messages, active context, header fie
   store.createChat(chat());
   const original = store.getChat('chat');
   // A deferred FK violation happens at COMMIT, after item updates were executed.
-  assert.throws(() => store.updateChat('chat', { title: 'Unsaved', folderId: 'missing', messages: [{ role: 'user', text: 'Unsaved' }], input: [{ role: 'user', content: 'Unsaved' }], compactions: [{ previous_input: [] }] }));
+  store.db.exec(`
+    CREATE TRIGGER invalid_context_reference AFTER UPDATE ON chats BEGIN
+      UPDATE chat_items SET payload_id = -1 WHERE chat_id = NEW.id AND collection = 'input';
+    END;
+  `);
+  assert.throws(() => store.updateChat('chat', { title: 'Unsaved', messages: [{ role: 'user', text: 'Unsaved' }], input: [{ role: 'user', content: 'Unsaved' }], compactions: [{ previous_input: [] }] }), /FOREIGN KEY/);
+  store.db.exec('DROP TRIGGER invalid_context_reference');
   assert.deepEqual(store.getChat('chat'), original);
   const limit = store.db.prepare('PRAGMA page_count').get().page_count;
   store.db.exec('PRAGMA max_page_count=' + limit);
@@ -147,4 +153,34 @@ test('migration command refuses to touch legacy files while the backend port is 
   assert.equal(result.status, 1); assert.match(result.stderr, /Stop the running harness/);
   assert.equal(readdirSync(path).filter(name => name.endsWith('.json')).length, 5);
   assert.equal(readdirSync(path).some(name => name.endsWith('.sqlite')), false);
+});
+
+test('fixed parentage survives reopen and blocks both storage updates and direct SQL column/header changes', t => {
+  const path = directory(t), store = open(t, path);
+  store.createFolder({ id: 'a', name: 'A', parentId: null });
+  store.createFolder({ id: 'b', name: 'B', parentId: null });
+  store.createFolder({ id: 'child', name: 'Child', parentId: 'a' });
+  store.createChat(chat('root'));
+  store.createChat({ ...chat('nested'), folderId: 'a' });
+  const before = store.listChats(), folders = store.listFolders();
+  for (const id of ['root', 'nested']) for (const folderId of [null, 'a', 'b']) {
+    const current = store.getChat(id);
+    if ((current.folderId ?? null) === folderId) continue;
+    assert.throws(() => store.updateChat(id, { folderId, title: 'Not saved', messages: [{ role: 'user', text: 'Not saved' }] }), /fixed at creation/);
+    assert.throws(() => store.db.prepare('UPDATE chats SET folder_id = ? WHERE id = ?').run(folderId, id), /fixed at creation/);
+    assert.throws(() => store.db.prepare("UPDATE chats SET data = json_set(data, '$.folderId', ?) WHERE id = ?").run(folderId, id), /fixed at creation/);
+  }
+  assert.throws(() => store.updateFolder('child', { parentId: 'b', name: 'Not saved' }), /fixed at creation/);
+  assert.throws(() => store.db.prepare("UPDATE folders SET parent_id = NULL WHERE id = 'child'").run(), /fixed at creation/);
+  assert.throws(() => store.db.prepare("UPDATE folders SET data = json_set(data, '$.parentId', NULL) WHERE id = 'child'").run(), /fixed at creation/);
+  assert.deepEqual(store.listChats(), before); assert.deepEqual(store.listFolders(), folders);
+  // Older installations have the same tables but lack these protections.
+  store.db.exec('DROP TRIGGER chats_keep_container; DROP TRIGGER folders_keep_parent;');
+  const reopened = open(t, path);
+  assert.deepEqual(reopened.listChats(), before); assert.deepEqual(reopened.listFolders(), folders);
+  assert.throws(() => reopened.db.prepare("UPDATE chats SET folder_id = 'b' WHERE id = 'root'").run(), /fixed at creation/);
+  assert.throws(() => reopened.db.prepare("UPDATE folders SET parent_id = 'b' WHERE id = 'child'").run(), /fixed at creation/);
+  reopened.updateChat('nested', { title: 'Renamed', archived: true });
+  reopened.updateChat('nested', { archived: false });
+  assert.equal(reopened.getChat('nested').folderId, 'a');
 });

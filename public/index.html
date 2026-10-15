@@ -13,6 +13,7 @@
     <div class="brand">harness<span>your conversations</span></div>
     <div class="sidebar-actions"><button id="new-chat">+ Chat</button><button id="new-folder" type="button">+ Folder</button></div>
     <nav id="chats" aria-label="Chats and folders"></nav>
+    <button id="archive-view" type="button" aria-pressed="false">Archived chats</button>
     <label class="appearance">Appearance
       <span class="select-wrap"><select id="theme">
         <option value="system">System</option>
@@ -32,8 +33,20 @@
       <h2 id="organize-heading">Edit</h2>
       <label>Name <input id="organize-name" required maxlength="120" autocomplete="off"></label>
       <label id="organize-parent-label">Folder <span class="select-wrap"><select id="organize-parent"></select></span></label>
+      <div id="chat-actions" class="chat-actions" hidden>
+        <button id="archive-chat" type="button">Archive chat</button>
+        <button id="delete-chat" class="danger" type="button">Delete permanently…</button>
+      </div>
       <p id="organize-error" role="alert" hidden></p>
       <div class="dialog-actions"><button id="organize-cancel" type="button">Cancel</button><button id="organize-save" type="submit">Save</button></div>
+    </form>
+  </dialog>
+  <dialog id="delete-confirm-dialog" aria-labelledby="delete-confirm-heading" aria-describedby="delete-confirm-text">
+    <form method="dialog">
+      <h2 id="delete-confirm-heading">Are you sure?</h2>
+      <p id="delete-confirm-text"></p>
+      <p>This removes the chat, messages, context, and metadata from the current database. This cannot be undone.</p>
+      <div class="dialog-actions"><button value="cancel" autofocus>Cancel</button><button value="delete" class="danger">Delete permanently</button></div>
     </form>
   </dialog>
   <main>
@@ -43,6 +56,7 @@
       <label>Effort <span class="select-wrap"><select id="effort" disabled><option value="default">Default</option></select></span></label>
       <button id="speed" type="button" aria-pressed="false" title="Request faster processing without changing reasoning effort. Uses more of your plan allowance; availability and speed depend on the model." disabled>⚡ Fast</button>
     </header>
+    <p id="archive-notice" hidden>Archived chat · Click the selected chat again to restore it or delete it.</p>
     <p id="error" role="alert" hidden></p>
     <section id="messages" aria-label="Conversation" aria-live="polite"></section>
     <form id="composer">

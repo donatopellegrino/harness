@@ -2,6 +2,12 @@
 
 A minimal local chat harness: Continue with ChatGPT, open separate chats, choose a model and reasoning effort, and send messages with streamed replies.
 
+Organization is a hierarchy of containers and chats; chats are leaves. A chat belongs to the container selected when it is created, or to the top level. Existing chats and containers cannot be moved. Parentage is protected by the API and SQLite triggers, with regression tests and the product rules in `AGENTS.md` keeping this restriction explicit.
+
+Click an already selected chat again to open its edit dialog. **Archive chat** hides it from the folder tree; **Archived chats** in the sidebar opens a flat list where you can read it and use **Restore chat** to return it to its original folder. Archived chats cannot generate replies, compact, or change model settings until restored. Renaming remains available; archive/restore never changes the chat's container.
+
+**Delete permanently…** asks “Are you sure?” before removing the chat. Deletion runs in a SQLite transaction and cascades to all its message, input/context, compaction, failed-attempt, and shared-payload rows; it is not a soft delete and has no undo. Other chats, folders, and account state are preserved. Chats that are currently working cannot be archived, restored, or deleted. Historical database backups are independent files and are not modified by chat deletion; this feature does not claim forensic erasure of disk pages or backup copies.
+
 ## Run
 
 Requires Node.js 22.13 or later (uses the built-in SQLite driver).

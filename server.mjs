@@ -28,7 +28,7 @@ const json = (response, value, status = 200) => {
   response.end(JSON.stringify(value));
 };
 // Keep the ordinary UI payload small; full metadata stays in protected storage.
-const organizationView = chat => ({ id: chat.id, title: chat.title, folderId: chat.folderId ?? null, organizationVersion: chat.organizationVersion ?? 0 });
+const organizationView = chat => ({ id: chat.id, title: chat.title, folderId: chat.folderId ?? null, archived: chat.archived === true, organizationVersion: chat.organizationVersion ?? 0 });
 const view = chat => ({ ...organizationView(chat), model: chat.model, effort: chat.effort, fast: chat.fast === true,
   contextUsage: chat.contextUsageSource === 'compaction' ? chat.contextUsage : latestUsage(chat.messages),
   contextUsageSource: chat.contextUsageSource === 'compaction' ? 'compaction' : 'reply',
@@ -144,13 +144,17 @@ export async function createHarness({ port = 0, directory = join(root, '.data'),
         let chat = findChat(organizationMatch[1]);
         if (!chat) throw fail('Chat not found.', 404);
         const body = await readJSON(request);
-        if (!body || typeof body !== 'object' || (!('title' in body) && !('folderId' in body))) throw fail('Provide a name or folder.');
+        if (!body || typeof body !== 'object' || (!('title' in body) && !('folderId' in body) && !('archived' in body))) throw fail('Provide a name, folder, or archive state.');
+        if ('archived' in body && typeof body.archived !== 'boolean') throw fail('Archive state must be on or off.');
         // A reply or another rename may start while the body is arriving.
         // Re-read the current header or share that reply's in-flight object.
         chat = findChat(organizationMatch[1]);
+        if (!chat) throw fail('Chat not found.', 404);
+        if ('archived' in body && running.has(chat.id)) throw fail('Wait for this chat to finish working before archiving or restoring it.', 409);
         // Organization is independent of generation settings and can change during a reply.
         commitChat(chat, { ...('title' in body ? { title: itemName(body.title), titleEdited: true } : {}),
           ...('folderId' in body ? { folderId: folderParent(store.listFolders(), body.folderId) } : {}),
+          ...('archived' in body ? { archived: body.archived } : {}),
           organizationVersion: (chat.organizationVersion ?? 0) + 1 });
         return json(response, organizationView(chat));
       }
@@ -162,19 +166,31 @@ export async function createHarness({ port = 0, directory = join(root, '.data'),
       }
       const match = url.pathname.match(/^\/api\/chats\/([\w-]+)(\/(?:messages|compact))?$/);
       if (!match) throw fail('Not found.', 404);
-      const chat = findChat(match[1]);
+      let chat = findChat(match[1]);
       if (!chat) throw fail('Chat not found.', 404);
       if (running.has(chat.id)) throw fail('This chat is already generating a reply.', 409);
       const body = await readJSON(request);
       if (!body || typeof body !== 'object') throw fail('Expected a JSON object.');
+      chat = findChat(match[1]);
+      if (!chat) throw fail('Chat not found.', 404);
       if (running.has(chat.id)) throw fail('This chat is already generating a reply.', 409);
-      Object.assign(chat, store.getChat(chat.id));
+      if (!match[2] && request.method === 'DELETE') {
+        if (body.confirmed !== true) throw fail('Confirm permanent deletion first.');
+        store.deleteChat(chat.id);
+        activityRevision++;
+        return json(response, { deleted: chat.id });
+      }
+      if (chat.archived === true) throw fail('Restore this archived chat before changing settings, sending messages, or compacting it.', 409);
       const manual = match[2] === '/compact';
       if (!match[2] && request.method === 'PATCH') {
         if (typeof body.model !== 'string' || typeof body.effort !== 'string') throw fail('Choose a model and effort.');
         if (body.fast !== undefined && typeof body.fast !== 'boolean') throw fail('Fast mode must be on or off.');
         const selected = resolveModel(await models(), body.model);
         if (body.effort !== 'default' && !selected.efforts.includes(body.effort)) throw fail('Choose a supported effort.');
+        // Loading the catalog can overlap an archive or permanent deletion.
+        chat = findChat(match[1]);
+        if (!chat) throw fail('Chat not found.', 404);
+        if (chat.archived === true) throw fail('Restore this archived chat before changing settings.', 409);
         if (running.has(chat.id)) throw fail('This chat is already generating a reply.', 409);
         commitChat(chat, { model: body.model, effort: body.effort, ...(body.fast !== undefined ? { fast: body.fast } : {}) });
         return json(response, view(chat));

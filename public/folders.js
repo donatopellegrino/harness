@@ -1,5 +1,7 @@
 import { folderActivityCounts } from './activity.js';
 
+export const visibleChats = (chats, archived = false) => chats.filter(chat => (chat.archived === true) === archived);
+
 // Folder choices retain full paths so duplicate names remain distinguishable.
 export function folderChoices(folders, exclude = null) {
   const blocked = new Set(exclude ? [exclude] : []);
@@ -28,12 +30,12 @@ export function mergeChat(current, incoming) {
     ? { ...incoming, ...current } : incoming;
   const currentVersion = current.organizationVersion ?? 0, incomingVersion = incoming.organizationVersion ?? 0;
   const organization = currentVersion === incomingVersion ? conversation : currentVersion > incomingVersion ? current : incoming;
-  return { ...conversation, title: organization.title, folderId: organization.folderId, organizationVersion: organization.organizationVersion };
+  return { ...conversation, title: organization.title, folderId: organization.folderId, archived: organization.archived === true, organizationVersion: organization.organizationVersion };
 }
 
 export function mergeOrganization(current, incoming) {
   if ((incoming.organizationVersion ?? 0) <= (current.organizationVersion ?? 0)) return current;
-  return { ...current, title: incoming.title, folderId: incoming.folderId, organizationVersion: incoming.organizationVersion };
+  return { ...current, title: incoming.title, folderId: incoming.folderId, archived: incoming.archived === true, organizationVersion: incoming.organizationVersion };
 }
 
 export function organizationChanges(kind, item, name, parentId) {
@@ -43,7 +45,7 @@ export function organizationChanges(kind, item, name, parentId) {
     ...(!item || parentId !== (item[parentKey] ?? null) ? { [parentKey]: parentId } : {}) };
 }
 
-export function createFolders({ state, api, onOrganization, onFolder, onSelectChat, afterRender }) {
+export function createFolders({ state, api, onOrganization, onFolder, onSelectChat, onLifecycle, afterRender }) {
   const $ = id => document.getElementById(id);
   let selected = null, selection = null, editing = null, saving = false;
   const collapsed = new Set();
@@ -70,8 +72,38 @@ export function createFolders({ state, api, onOrganization, onFolder, onSelectCh
     $('organize-parent').replaceChildren(...choices.map(choice => new Option(choice.name, choice.id)));
     $('organize-parent').value = (item ? folder ? item.parentId : item.folderId : selected) ?? '';
     $('organize-error').hidden = true; $('organize-save').textContent = item ? 'Save' : 'Create';
+    $('chat-actions').hidden = folder;
+    $('archive-chat').textContent = item?.archived ? 'Restore chat' : 'Archive chat';
+    for (const id of ['archive-chat', 'delete-chat']) $(id).disabled = state().locked;
     $('organize-dialog').showModal(); $('organize-name').focus(); $('organize-name').select();
   }
+  async function lifecycle(remove) {
+    if (saving || state().locked || editing?.kind !== 'chat') return;
+    const { item } = editing;
+    if (remove) {
+      const dialog = $('delete-confirm-dialog');
+      $('delete-confirm-text').textContent = `Permanently delete “${item.title}”?`;
+      dialog.returnValue = '';
+      const confirmed = new Promise(resolve => dialog.addEventListener('close', () => resolve(dialog.returnValue === 'delete'), { once: true }));
+      dialog.showModal();
+      if (!await confirmed) return;
+    }
+    saving = true;
+    for (const control of $('organize-form').querySelectorAll('input, select, button')) control.disabled = true;
+    $('organize-error').hidden = true;
+    try {
+      if (remove) await api(`/api/chats/${item.id}`, 'DELETE', { confirmed: true });
+      else onOrganization(await api(`/api/chats/${item.id}/organization`, 'PATCH', { archived: !item.archived }));
+      onLifecycle({ id: item.id, removed: remove });
+      $('organize-dialog').close();
+    } catch (error) { $('organize-error').textContent = error.message; $('organize-error').hidden = false; }
+    finally {
+      saving = false;
+      for (const control of $('organize-form').querySelectorAll('input, select, button')) control.disabled = false;
+    }
+  }
+  $('archive-chat').onclick = () => lifecycle(false);
+  $('delete-chat').onclick = () => lifecycle(true);
   $('new-folder').onclick = () => edit('folder');
   $('organize-cancel').onclick = () => $('organize-dialog').close();
   $('organize-dialog').addEventListener('cancel', event => { if (saving) event.preventDefault(); });
@@ -99,15 +131,18 @@ export function createFolders({ state, api, onOrganization, onFolder, onSelectCh
     }
   };
   function render() {
-    const { folders, chats, activeId } = state();
+    const { folders, chats: allChats, activeId, archivedView = false } = state();
+    const chats = visibleChats(allChats, archivedView);
     if (!selection && activeId) selection = { kind: 'chat', id: activeId };
     if (selected && !folders.some(folder => folder.id === selected)) selected = null;
     const nav = $('chats'); nav.replaceChildren();
-    const root = button('Top level', 'folder-label', () => { selected = null; selection = { kind: 'root' }; render(); afterRender(); });
-    root.setAttribute('aria-pressed', String(selection?.kind === 'root')); nav.append(root);
+    if (!archivedView) {
+      const root = button('Top level', 'folder-label', () => { selected = null; selection = { kind: 'root' }; render(); afterRender(); });
+      root.setAttribute('aria-pressed', String(selection?.kind === 'root')); nav.append(root);
+    }
     const visited = new Set();
     function contents(parentId, container) {
-      for (const folder of folders.filter(item => (item.parentId ?? null) === parentId)) {
+      for (const folder of folders.filter(item => !archivedView && (item.parentId ?? null) === parentId)) {
         if (visited.has(folder.id)) continue;
         visited.add(folder.id);
         const group = document.createElement('div'); group.className = 'folder-group';
@@ -127,7 +162,7 @@ export function createFolders({ state, api, onOrganization, onFolder, onSelectCh
         row.append(toggle, label, indicator('folder', folder.id));
         group.append(row, children); container.append(group); contents(folder.id, children);
       }
-      for (const chat of chats.filter(item => (item.folderId ?? null) === parentId)) {
+      for (const chat of chats.filter(item => archivedView || (item.folderId ?? null) === parentId)) {
         const row = document.createElement('div'); row.className = 'sidebar-row';
         const open = button(chat.title, 'chat-open', () => {
           if (selection?.kind === 'chat' && selection.id === chat.id) { edit('chat', chat); return; }
@@ -136,11 +171,14 @@ export function createFolders({ state, api, onOrganization, onFolder, onSelectCh
           // conversation is locked. Keep that conversation and its draft intact.
           if (onSelectChat(chat.id) === false) { render(); afterRender(); }
         });
-        open.dataset.chatOpen = ''; open.dataset.chatId = chat.id; open.title = `${chat.title} · Click again to rename or move`; open.setAttribute('aria-current', String(selection?.kind === 'chat' && chat.id === selection.id));
+        open.dataset.chatOpen = ''; open.dataset.chatId = chat.id; open.title = `${chat.title} · Click again to edit, ${chat.archived ? 'restore' : 'archive'}, or delete`; open.setAttribute('aria-current', String(selection?.kind === 'chat' && chat.id === selection.id));
         row.append(open, indicator('chat', chat.id)); container.append(row);
       }
     }
     contents(null, nav); updateActivity();
+    if (archivedView && !chats.length) {
+      const empty = document.createElement('p'); empty.className = 'sidebar-empty'; empty.textContent = 'No archived chats.'; nav.append(empty);
+    }
   }
   function indicator(kind, id) {
     const node = document.createElement('span'); node.className = 'activity-indicator'; node.hidden = true;

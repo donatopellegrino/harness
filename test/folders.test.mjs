@@ -110,7 +110,7 @@ test('move-only edits preserve automatic titles and delayed organization replies
   const changes = organizationChanges('chat', original, original.title, folder.id);
   assert.deepEqual(changes, { folderId: folder.id });
   const delayedMove = await (await f.call('/api/chats/old/organization', 'PATCH', changes)).json();
-  assert.deepEqual(Object.keys(delayedMove).sort(), ['folderId', 'id', 'organizationVersion', 'title']);
+  assert.deepEqual(Object.keys(delayedMove).sort(), ['archived', 'folderId', 'id', 'organizationVersion', 'title']);
   const settings = await (await f.call('/api/chats/old', 'PATCH', { model: 'gpt-6.1-sol', effort: 'high', fast: true })).json();
   assert.equal(mergeOrganization(settings, delayedMove).fast, true);
   const stream = await f.call('/api/chats/old/messages', 'POST', { text: 'Generated first title' });

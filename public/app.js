@@ -3,7 +3,7 @@ import { reconcileCompaction } from '/compaction-sync.js';
 import { createMessageInfo } from '/message-info.js';
 import { resizeComposer } from '/composer.js';
 import { createScrollFollow } from '/scroll-follow.js';
-import { createFolders, mergeChat, mergeOrganization } from '/folders.js';
+import { createFolders, mergeChat, mergeOrganization, visibleChats } from '/folders.js';
 
 const $ = id => document.getElementById(id);
 let chats = [], folders = [], models = [], account = {}, activeId, busy = false, compacting = false, savingSettings = false;
@@ -32,10 +32,23 @@ function replaceChat(chat) {
   const index = chats.findIndex(item => item.id === chat.id);
   if (index < 0) chats.unshift(chat); else chats[index] = mergeChat(chats[index], chat);
 }
-const folderSidebar = createFolders({ state: () => ({ folders, chats, activeId, activities: displayedActivities() }), api,
+let archivedView = false;
+function selectFirstChat() {
+  const chat = visibleChats(chats, archivedView)[0];
+  activeId = chat?.id;
+  folderSidebar.selectChat(activeId, chat?.folderId);
+  if (chat?.folderId) folderSidebar.revealFolder(chat.folderId);
+  $('prompt').value = '';
+}
+const folderSidebar = createFolders({ state: () => ({ folders, chats, activeId, archivedView, locked: busy || savingSettings, activities: displayedActivities() }), api,
   onOrganization: update => { const index = chats.findIndex(chat => chat.id === update.id); if (index >= 0) chats[index] = mergeOrganization(chats[index], update); },
   onFolder: folder => { const index = folders.findIndex(item => item.id === folder.id); if (index < 0) folders.push(folder); else folders[index] = folder; },
   onSelectChat: id => { if (id === activeId) { renderChats(); controls(); return true; } if (busy || savingSettings) return false; activeId = id; $('prompt').value = ''; render(); return true; },
+  onLifecycle: ({ id, removed }) => {
+    if (removed) { chats = chats.filter(chat => chat.id !== id); activities.delete(id); }
+    if (!visibleChats(chats, archivedView).some(chat => chat.id === activeId)) selectFirstChat();
+    render();
+  },
   afterRender: controls,
 });
 const messageInfo = createMessageInfo({ load: (chatId, index) => api(`/api/chats/${chatId}/messages/${index}/metadata`) });
@@ -47,21 +60,28 @@ function controls() {
   folderSidebar.updateActivity();
   const connected = account.sharing && models.length > 0;
   const locked = busy || savingSettings;
+  const readOnly = active()?.archived === true || archivedView && !active();
   if (lastLocked && !locked) folderSidebar.restoreActiveSelection();
   lastLocked = locked;
-  $('send').disabled = locked || !connected || !modelID();
+  $('send').disabled = locked || readOnly || !connected || !modelID();
   $('send-effort').disabled = $('send').disabled || !$('prompt').value.trim();
   if ($('send-effort').disabled) closeEffortMenu();
   $('new-chat').disabled = locked;
-  $('model').disabled = locked || !connected;
-  $('model-id').disabled = locked || !connected;
-  $('effort').disabled = locked || !connected;
-  $('speed').disabled = locked || !connected;
+  $('new-folder').disabled = locked || archivedView;
+  $('archive-view').disabled = locked;
+  $('archive-view').setAttribute('aria-pressed', String(archivedView));
+  const archivedCount = visibleChats(chats, true).length;
+  $('archive-view').textContent = archivedView ? '← Back to chats' : `Archived chats${archivedCount ? ` (${archivedCount})` : ''}`;
+  $('archive-notice').hidden = !active()?.archived;
+  $('model').disabled = locked || readOnly || !connected;
+  $('model-id').disabled = locked || readOnly || !connected;
+  $('effort').disabled = locked || readOnly || !connected;
+  $('speed').disabled = locked || readOnly || !connected;
   $('login').disabled = locked;
   $('logout').disabled = locked;
-  $('prompt').disabled = locked;
+  $('prompt').disabled = locked || readOnly;
   $('send').textContent = busy && !compacting ? 'Replying…' : 'Send';
-  $('compact').disabled = locked || !connected || !modelID() || !active()?.messages.length;
+  $('compact').disabled = locked || readOnly || !connected || !modelID() || !active()?.messages.length;
   $('compact').textContent = compacting ? 'Compacting…' : 'Compact context';
   renderContext();
 }
@@ -136,8 +156,8 @@ function renderMessages({ preserveScroll = false } = {}) {
     mark(0);
     if (!history.length) {
       const empty = document.createElement('div'); empty.className = 'empty';
-      const title = document.createElement('h1'); title.textContent = 'A simple place to chat.';
-      const subtitle = document.createElement('p'); subtitle.textContent = account.sharing ? 'Choose a model and send a message.' : 'Continue with ChatGPT to get started.';
+      const title = document.createElement('h1'); title.textContent = archivedView ? 'Archived conversations' : 'A simple place to chat.';
+      const subtitle = document.createElement('p'); subtitle.textContent = archivedView ? 'No archived chats. Archive one from its edit dialog.' : account.sharing ? 'Choose a model and send a message.' : 'Continue with ChatGPT to get started.';
       empty.append(title, subtitle); $('messages').append(empty);
     } else history.forEach((item, index) => { message(item.role, item.text, { chatId: activeId, index }); mark(index + 1); });
   };
@@ -171,12 +191,12 @@ async function refresh() {
   $('login').textContent = account.connected ? 'Enable ChatGPT plan usage' : 'Continue with ChatGPT';
   $('logout').hidden = !account.connected;
   models = [];
-  if (!chats.some(chat => chat.id === activeId)) activeId = chats[0]?.id;
+  if (!visibleChats(chats, archivedView).some(chat => chat.id === activeId)) selectFirstChat();
   render();
   if (account.sharing) { models = (await api('/api/models')).models; render(); }
 }
 async function newChat({ preserveDraft = false } = {}) {
-  const chat = await api('/api/chats', 'POST', { folderId: folderSidebar.selectedFolder() }); replaceChat(chat); activeId = chat.id; folderSidebar.selectChat(chat.id, chat.folderId); folderSidebar.revealFolder(chat.folderId);
+  const chat = await api('/api/chats', 'POST', { folderId: archivedView ? null : folderSidebar.selectedFolder() }); archivedView = false; replaceChat(chat); activeId = chat.id; folderSidebar.selectChat(chat.id, chat.folderId); folderSidebar.revealFolder(chat.folderId);
   if (!preserveDraft) $('prompt').value = '';
   render(); $('prompt').focus();
 }
@@ -197,6 +217,10 @@ async function saveSettings() {
   } finally { savingSettings = false; controls(); }
 }
 $('new-chat').onclick = safely(newChat);
+$('archive-view').onclick = safely(() => {
+  if (busy || savingSettings) return;
+  archivedView = !archivedView; selectFirstChat(); render();
+});
 $('model').onchange = safely(async () => {
   const custom = $('model').value === CUSTOM_MODEL;
   $('model-id').hidden = !custom;
@@ -355,7 +379,7 @@ document.addEventListener('visibilitychange', () => { if (document.hidden) close
 $('prompt').addEventListener('input', controls);
 $('composer').onsubmit = safely(async event => {
   event.preventDefault();
-  const text = $('prompt').value.trim(); if (!text || busy || savingSettings || !account.sharing) return;
+  const text = $('prompt').value.trim(); if (!text || busy || savingSettings || !account.sharing || archivedView || active()?.archived) return;
   busy = true; controls(); showError(''); showStatus('');
   let received = '', done = false;
   try {

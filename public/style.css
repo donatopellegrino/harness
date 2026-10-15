@@ -164,7 +164,7 @@ header select { max-width: 230px; }
 .role { align-self: auto; flex-wrap: nowrap; gap: 5px; margin: 0; font-weight: 500; font-size: 12px; }
 .content { min-width: 0; max-width: 100%; padding: 10px 14px; border: 1px solid var(--assistant-border); border-radius: 10px; background: var(--assistant-bg); font-size: 15px; line-height: 1.55; }
 .message.user .content { max-width: 85%; background: var(--user-bg); color: var(--user-text); border-color: var(--user-border); border-top-right-radius: 3px; }
-.message.assistant .content { border-top-left-radius: 3px; }
+.message.assistant .content { background: transparent; border: 0; border-radius: 0; padding: 0; }
 .empty { margin-top: 12vh; }
 .empty h1 { font-family: Georgia, 'Times New Roman', serif; font-weight: 400; }
 #composer { flex-shrink: 0; width: 100%; margin: 10px 0 0; border-radius: 6px; gap: 7px; padding: 8px 10px; background: var(--control); }

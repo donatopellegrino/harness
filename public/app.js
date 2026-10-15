@@ -154,12 +154,11 @@ function renderMessages({ preserveScroll = false } = {}) {
       }
     };
     mark(0);
-    if (!history.length) {
+    if (!history.length && archivedView) {
       const empty = document.createElement('div'); empty.className = 'empty';
-      const title = document.createElement('h1'); title.textContent = archivedView ? 'Archived conversations' : 'A simple place to chat.';
-      const subtitle = document.createElement('p'); subtitle.textContent = archivedView
-        ? active() ? 'This archived chat has no messages. Restore it from its edit dialog to start chatting.' : 'No archived chats. Archive one from its edit dialog.'
-        : account.sharing ? 'Choose a model and send a message.' : 'Continue with ChatGPT to get started.';
+      const title = document.createElement('h1'); title.textContent = 'Archived conversations';
+      const subtitle = document.createElement('p'); subtitle.textContent = active()
+        ? 'This archived chat has no messages. Restore it from its edit dialog to start chatting.' : 'No archived chats. Archive one from its edit dialog.';
       empty.append(title, subtitle); $('messages').append(empty);
     } else history.forEach((item, index) => { message(item.role, item.text, { chatId: activeId, index }); mark(index + 1); });
   };

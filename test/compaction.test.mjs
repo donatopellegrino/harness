@@ -70,6 +70,8 @@ test('automatic checkpoints prune replay, manual compaction preserves transcript
   assert.equal(saved.messages[0].text, 'Remember the project code.');
   assert.equal(saved.messages.at(-1).metadata.events[0].item.id, 'automatic');
   assert.deepEqual(saved.compactions[0].previous_input, seed().input);
+  assert.equal(saved.compactions[0].after_message_count, 4);
+  assert.deepEqual(result.at(-1).chat.compactionMarkers, [{ afterMessageCount: 4, mode: 'automatic', completedAt: saved.compactions[0].completed_at }]);
   const transcript = saved.messages;
 
   mode = 'manual';
@@ -92,6 +94,7 @@ test('automatic checkpoints prune replay, manual compaction preserves transcript
   const publicChat = result.at(-1).chat;
   assert.equal(publicChat.contextUsageSource, 'compaction');
   assert.equal(publicChat.compactionCount, 2);
+  assert.deepEqual(publicChat.compactionMarkers.map(marker => [marker.afterMessageCount, marker.mode]), [[4, 'automatic'], [4, 'manual']]);
   assert.equal(JSON.stringify(publicChat).includes('encrypted'), false);
   assert.equal(JSON.stringify(saved).includes('private-token'), false);
 
@@ -109,6 +112,7 @@ test('automatic checkpoints prune replay, manual compaction preserves transcript
   const restarted = await f.connect();
   const state = await (await restarted.call('/api/state')).json();
   assert.equal(state.chats[0].contextUsageSource, 'compaction');
+  assert.deepEqual(state.chats[0].compactionMarkers, publicChat.compactionMarkers);
   mode = 'continue';
   await events(await restarted.call('/api/chats/chat/messages', 'POST', { text: 'Continue' }));
   assert.deepEqual(f.sent.at(-1).input, [checkpoint('manual'), { role: 'user', content: 'Continue' }]);

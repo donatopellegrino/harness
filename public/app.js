@@ -2,6 +2,7 @@ import { accountSynchronizer } from '/account-sync.js';
 import { reconcileCompaction } from '/compaction-sync.js';
 import { createMessageInfo } from '/message-info.js';
 import { resizeComposer } from '/composer.js';
+import { createScrollFollow } from '/scroll-follow.js';
 import { createFolders, mergeChat, mergeOrganization } from '/folders.js';
 
 const $ = id => document.getElementById(id);
@@ -38,6 +39,7 @@ const folderSidebar = createFolders({ state: () => ({ folders, chats, activeId, 
   afterRender: controls,
 });
 const messageInfo = createMessageInfo({ load: (chatId, index) => api(`/api/chats/${chatId}/messages/${index}/metadata`) });
+const messageScroll = createScrollFollow($('messages'));
 $('messages').addEventListener('scroll', () => messageInfo.close());
 function controls() {
   if (lastBusy !== busy) { activityEpoch++; if (!busy && activeId) activities.delete(activeId); lastBusy = busy; }
@@ -105,17 +107,41 @@ function message(role, text, record = null) {
   article.append(label, content); $('messages').append(article);
   return content;
 }
-function renderMessages() {
+function renderMessages({ preserveScroll = false } = {}) {
   messageInfo.close();
-  $('messages').replaceChildren();
-  const history = active()?.messages ?? [];
-  if (!history.length) {
-    const empty = document.createElement('div'); empty.className = 'empty';
-    const title = document.createElement('h1'); title.textContent = 'A simple place to chat.';
-    const subtitle = document.createElement('p'); subtitle.textContent = account.sharing ? 'Choose a model and send a message.' : 'Continue with ChatGPT to get started.';
-    empty.append(title, subtitle); $('messages').append(empty);
-  } else history.forEach((item, index) => message(item.role, item.text, { chatId: activeId, index }));
-  $('messages').scrollTop = $('messages').scrollHeight;
+  const draw = () => {
+    $('messages').replaceChildren();
+    const history = active()?.messages ?? [];
+    const markers = new Map();
+    for (const marker of active()?.compactionMarkers ?? []) {
+      const boundary = marker.afterMessageCount ?? 0;
+      if (!markers.has(boundary)) markers.set(boundary, []);
+      markers.get(boundary).push(marker);
+    }
+    const mark = boundary => {
+      for (const marker of markers.get(boundary) ?? []) {
+        const row = document.createElement('div'); row.className = 'compaction-marker'; row.setAttribute('role', 'note');
+        const label = document.createElement('span');
+        label.textContent = marker.mode === 'automatic' ? 'Context compacted automatically' : marker.mode === 'manual' ? 'Context compacted manually' : 'Context compacted';
+        if (marker.afterMessageCount === null) label.textContent += ' · position not recorded';
+        row.append(label);
+        if (marker.completedAt) {
+          const date = new Date(marker.completedAt), time = document.createElement('time');
+          time.dateTime = date.toISOString(); time.textContent = date.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'medium' });
+          time.title = `Completed ${date.toLocaleString()}`; row.append(time);
+        }
+        $('messages').append(row);
+      }
+    };
+    mark(0);
+    if (!history.length) {
+      const empty = document.createElement('div'); empty.className = 'empty';
+      const title = document.createElement('h1'); title.textContent = 'A simple place to chat.';
+      const subtitle = document.createElement('p'); subtitle.textContent = account.sharing ? 'Choose a model and send a message.' : 'Continue with ChatGPT to get started.';
+      empty.append(title, subtitle); $('messages').append(empty);
+    } else history.forEach((item, index) => { message(item.role, item.text, { chatId: activeId, index }); mark(index + 1); });
+  };
+  if (preserveScroll) messageScroll.update(draw); else messageScroll.reset(draw);
 }
 function fillEfforts() {
   closeEffortMenu();
@@ -228,6 +254,7 @@ $('compact').onclick = safely(async () => {
     const response = await fetch(`/api/chats/${chatId}/compact`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
     await readEvents(response, item => { if (item.type === 'done') { replaceChat(item.chat); done = true; } });
     if (!done) throw new Error('Compaction completion could not be confirmed.');
+    renderMessages({ preserveScroll: true });
   } catch (error) {
     showStatus('');
     if (!requested) throw error;
@@ -235,7 +262,7 @@ $('compact').onclick = safely(async () => {
     try {
       confirmed = await reconcileCompaction({ chatId, previousCount,
         readState: () => api('/api/state'),
-        onChat: chat => { replaceChat(chat); renderMessages(); },
+        onChat: chat => { replaceChat(chat); renderMessages({ preserveScroll: true }); },
       });
     } catch {
       throw new Error(`${error.message} Reload the page to check saved state before retrying compaction.`);
@@ -335,18 +362,21 @@ $('composer').onsubmit = safely(async event => {
     await saveSettings();
     $('prompt').value = '';
     resizeComposer($('prompt'));
-    if (!active().messages.length) $('messages').replaceChildren();
-    message('user', text); const reply = message('assistant', 'Thinking…');
+    let reply;
+    messageScroll.reset(() => {
+      if (!active().messages.length) $('messages').replaceChildren();
+      message('user', text); reply = message('assistant', 'Thinking…');
+    });
     const response = await fetch(`/api/chats/${activeId}/messages`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }) });
     await readEvents(response, item => {
-      if (item.type === 'delta') { received += item.text; reply.textContent = received; $('messages').scrollTop = $('messages').scrollHeight; }
+      if (item.type === 'delta') { received += item.text; messageScroll.update(() => { reply.textContent = received; }); }
       if (item.type === 'done') { replaceChat(item.chat); done = true; }
     });
     if (!done) throw new Error('The reply did not finish. Try again.');
-    renderChats(); renderMessages();
+    renderChats(); renderMessages({ preserveScroll: true });
   } catch (error) {
     // Failed turns are not added to saved history; preserve the draft for retry.
-    $('prompt').value = text; renderMessages(); showStatus(''); throw error;
+    $('prompt').value = text; renderMessages({ preserveScroll: true }); showStatus(''); throw error;
   } finally { busy = false; controls(); $('prompt').focus(); }
 });
 $('prompt').addEventListener('keydown', event => {

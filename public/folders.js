@@ -24,7 +24,7 @@ export function folderChoices(folders, exclude = null) {
 }
 
 export function mergeChat(current, incoming) {
-  // A delayed generation acknowledgment must not undo a more recent rename/move.
+  // A delayed generation acknowledgment must not undo a more recent rename/archive.
   if (!current) return incoming;
   const conversation = current.messages.length > incoming.messages.length || (current.compactionCount ?? 0) > (incoming.compactionCount ?? 0)
     ? { ...incoming, ...current } : incoming;
@@ -39,10 +39,9 @@ export function mergeOrganization(current, incoming) {
 }
 
 export function organizationChanges(kind, item, name, parentId) {
-  if (kind === 'folder' && item) return name !== item.name ? { name } : {};
-  const nameKey = kind === 'chat' ? 'title' : 'name', parentKey = kind === 'chat' ? 'folderId' : 'parentId';
-  return { ...(!item || name !== item[nameKey] ? { [nameKey]: name } : {}),
-    ...(!item || parentId !== (item[parentKey] ?? null) ? { [parentKey]: parentId } : {}) };
+  if (kind === 'folder' && !item) return { name, parentId };
+  const nameKey = kind === 'chat' ? 'title' : 'name';
+  return name !== item[nameKey] ? { [nameKey]: name } : {};
 }
 
 export function createFolders({ state, api, onOrganization, onFolder, onSelectChat, onLifecycle, afterRender }) {
@@ -67,7 +66,7 @@ export function createFolders({ state, api, onOrganization, onFolder, onSelectCh
     $('organize-heading').textContent = item ? `Edit ${folder ? 'folder' : 'chat'}` : 'New folder';
     $('organize-name').value = item ? (folder ? item.name : item.title) : '';
     $('organize-parent-label').firstChild.textContent = folder ? 'Parent folder ' : 'Folder ';
-    $('organize-parent-label').hidden = folder && !!item;
+    $('organize-parent-label').hidden = !!item;
     const choices = folderChoices(state().folders, folder ? item?.id : null);
     $('organize-parent').replaceChildren(...choices.map(choice => new Option(choice.name, choice.id)));
     $('organize-parent').value = (item ? folder ? item.parentId : item.folderId : selected) ?? '';
@@ -109,7 +108,7 @@ export function createFolders({ state, api, onOrganization, onFolder, onSelectCh
   $('organize-dialog').addEventListener('cancel', event => { if (saving) event.preventDefault(); });
   $('organize-form').onsubmit = async event => {
     event.preventDefault(); if (saving || !editing) return;
-    const { kind, item } = editing, name = $('organize-name').value.trim(), parent = $('organize-parent').value || null;
+    const { kind, item } = editing, name = $('organize-name').value.trim(), parent = item ? null : $('organize-parent').value || null;
     if (!name) { $('organize-error').textContent = 'Enter a name.'; $('organize-error').hidden = false; return; }
     const changes = organizationChanges(kind, item, name, parent);
     if (!Object.keys(changes).length) { $('organize-dialog').close(); return; }

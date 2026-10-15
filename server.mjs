@@ -144,7 +144,9 @@ export async function createHarness({ port = 0, directory = join(root, '.data'),
         let chat = findChat(organizationMatch[1]);
         if (!chat) throw fail('Chat not found.', 404);
         const body = await readJSON(request);
-        if (!body || typeof body !== 'object' || (!('title' in body) && !('folderId' in body) && !('archived' in body))) throw fail('Provide a name, folder, or archive state.');
+        if (!body || typeof body !== 'object') throw fail('Expected a JSON object.');
+        if ('folderId' in body) throw fail('A chat\'s container is fixed at creation. Existing chats cannot be moved.');
+        if (!('title' in body) && !('archived' in body)) throw fail('Provide a name or archive state.');
         if ('archived' in body && typeof body.archived !== 'boolean') throw fail('Archive state must be on or off.');
         // A reply or another rename may start while the body is arriving.
         // Re-read the current header or share that reply's in-flight object.
@@ -153,7 +155,6 @@ export async function createHarness({ port = 0, directory = join(root, '.data'),
         if ('archived' in body && running.has(chat.id)) throw fail('Wait for this chat to finish working before archiving or restoring it.', 409);
         // Organization is independent of generation settings and can change during a reply.
         commitChat(chat, { ...('title' in body ? { title: itemName(body.title), titleEdited: true } : {}),
-          ...('folderId' in body ? { folderId: folderParent(store.listFolders(), body.folderId) } : {}),
           ...('archived' in body ? { archived: body.archived } : {}),
           organizationVersion: (chat.organizationVersion ?? 0) + 1 });
         return json(response, organizationView(chat));

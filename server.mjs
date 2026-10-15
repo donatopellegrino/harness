@@ -9,6 +9,7 @@ import { normalizeModels, resolveModel, responseText, streamReply, latestUsage, 
 import { readableMessageMetadata } from './lib/message-metadata.mjs';
 import { compactionMarkers } from './lib/compaction-markers.mjs';
 import { itemName, folderParent } from './lib/folders.mjs';
+import { agentsInstructions } from './lib/agents-md.mjs';
 
 const root = dirname(fileURLToPath(import.meta.url));
 const assets = new Map([
@@ -19,6 +20,7 @@ const assets = new Map([
   ['/scroll-follow.js', ['scroll-follow.js', 'text/javascript']],
   ['/activity.js', ['activity.js', 'text/javascript']],
   ['/folders.js', ['folders.js', 'text/javascript']],
+  ['/agents-md.js', ['agents-md.js', 'text/javascript']],
   ['/message-info.js', ['message-info.js', 'text/javascript']],
   ['/theme.js', ['theme.js', 'text/javascript']],
 ]);
@@ -106,6 +108,18 @@ export async function createHarness({ port = 0, directory = join(root, '.data'),
       if (url.pathname === '/api/activity' && request.method === 'GET') return json(response, activity());
       if (url.pathname === '/api/account' && request.method === 'GET') return json(response, auth.status());
       if (url.pathname === '/api/models' && request.method === 'GET') return json(response, { models: await models() });
+      const agentsMatch = url.pathname.match(/^\/api\/(?:agents-md\/(global)|folders\/([\w-]+)\/agents-md)$/);
+      if (agentsMatch) {
+        const folderId = agentsMatch[2] ?? null;
+        if (folderId !== null && !store.listFolders().some(folder => folder.id === folderId)) throw fail('Folder not found.', 404);
+        if (request.method === 'GET') return json(response, store.getAgentsMd(folderId));
+        if (request.method === 'PUT') {
+          const body = await readJSON(request);
+          if (!body || typeof body !== 'object' || Array.isArray(body)) throw fail('Expected a JSON object.');
+          return json(response, store.saveAgentsMd(folderId, body.content, body.revision));
+        }
+        throw fail('Method not allowed.', 405);
+      }
       const metadataMatch = url.pathname.match(/^\/api\/chats\/([\w-]+)\/messages\/(\d+)\/metadata$/);
       if (metadataMatch && request.method === 'GET') {
         const chat = findChat(metadataMatch[1]);
@@ -222,9 +236,10 @@ export async function createHarness({ port = 0, directory = join(root, '.data'),
           response.flushHeaders();
           if (manual) emit({ type: 'status', message: 'Compacting context… This can take a few minutes.' });
           const input = manual ? chat.input : [...chat.input, user];
+          const agents = store.agentsForChat(chat.folderId ?? null);
           const output = await streamReply({
             fetcher, token, model: chat.model, effort: chat.effort, fast: chat.fast === true,
-            input, compactThreshold: threshold,
+            input, instructions: agentsInstructions(agents), compactThreshold: threshold,
             // Avoid temporary instructions: OpenAI can carry them into the
             // encrypted checkpoint. Discard this request's generated reply.
             ...(manual ? { requireMessage: false } : {}),
@@ -233,7 +248,7 @@ export async function createHarness({ port = 0, directory = join(root, '.data'),
             onServiceTier: tier => {
               if (chat.fast === true && tier === 'default') emit({ type: 'notice', message: 'Fast mode was requested, but OpenAI used Standard processing for this reply.' });
             },
-            onMetadata: value => { metadata = value; },
+            onMetadata: value => { metadata = { ...value, agents_md: agents.map(({ folderId, revision, updatedAt }) => ({ folderId, revision, updatedAt })) }; },
           });
           if (controller.signal.aborted) { saveFailedAttempt(manual ? 'Compaction was cancelled.' : 'Reply was cancelled.'); return; }
           const checkpoint = output.findLast(item => item.type === 'compaction');

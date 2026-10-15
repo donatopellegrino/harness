@@ -44,7 +44,7 @@ export function organizationChanges(kind, item, name, parentId) {
   return name !== item[nameKey] ? { [nameKey]: name } : {};
 }
 
-export function createFolders({ state, api, onOrganization, onFolder, onSelectChat, onLifecycle, afterRender }) {
+export function createFolders({ state, api, onOrganization, onFolder, onSelectChat, onLifecycle, onAgents, afterRender }) {
   const $ = id => document.getElementById(id);
   let selected = null, selection = null, editing = null, saving = false;
   const collapsed = new Set();
@@ -72,6 +72,7 @@ export function createFolders({ state, api, onOrganization, onFolder, onSelectCh
     $('organize-parent').value = (item ? folder ? item.parentId : item.folderId : selected) ?? '';
     $('organize-error').hidden = true; $('organize-save').textContent = item ? 'Save' : 'Create';
     $('chat-actions').hidden = folder;
+    $('folder-agents').hidden = !folder || !item;
     $('archive-chat').textContent = item?.archived ? 'Restore chat' : 'Archive chat';
     for (const id of ['archive-chat', 'delete-chat']) $(id).disabled = state().locked;
     $('organize-dialog').showModal(); $('organize-name').focus(); $('organize-name').select();
@@ -103,6 +104,9 @@ export function createFolders({ state, api, onOrganization, onFolder, onSelectCh
   }
   $('archive-chat').onclick = () => lifecycle(false);
   $('delete-chat').onclick = () => lifecycle(true);
+  $('folder-agents').onclick = () => {
+    if (!saving && editing?.kind === 'folder' && editing.item) onAgents({ folderId: editing.item.id, name: editing.item.name });
+  };
   $('new-folder').onclick = () => edit('folder');
   $('organize-cancel').onclick = () => $('organize-dialog').close();
   $('organize-dialog').addEventListener('cancel', event => { if (saving) event.preventDefault(); });
@@ -157,7 +161,7 @@ export function createFolders({ state, api, onOrganization, onFolder, onSelectCh
           if (selection?.kind === 'folder' && selection.id === folder.id) { edit('folder', folder); return; }
           selected = folder.id; selection = { kind: 'folder', id: folder.id }; render(); afterRender();
         });
-        label.title = `${folder.name} · Click again to rename`; label.setAttribute('aria-pressed', String(selection?.kind === 'folder' && selection.id === folder.id));
+        label.title = `${folder.name} · Click again to rename or edit AGENTS.md`; label.setAttribute('aria-pressed', String(selection?.kind === 'folder' && selection.id === folder.id));
         row.append(toggle, label, indicator('folder', folder.id));
         group.append(row, children); container.append(group); contents(folder.id, children);
       }

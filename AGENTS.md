@@ -9,3 +9,4 @@ Make code changes on a feature branch and submit a pull request. Do not push cha
 - Renaming, archiving, restoring, deleting, or redesigning the UI must not introduce moving or reparenting. Archive/restore preserves the original container.
 - Enforce fixed parentage in the UI, API, storage, and regression tests. Do not remove or relax these protections unless the user explicitly changes this requirement.
 - Do not infer additional organization features from requests about unrelated features.
+- Model requests receive only database-backed global AGENTS.md and the chat's immediate container AGENTS.md. Never inherit from ancestors or other containers, and never read repository/host instruction files into chat requests.

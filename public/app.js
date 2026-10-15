@@ -3,6 +3,7 @@ import { reconcileCompaction } from '/compaction-sync.js';
 import { createMessageInfo } from '/message-info.js';
 import { resizeComposer } from '/composer.js';
 import { createScrollFollow } from '/scroll-follow.js';
+import { createAgentsEditor } from '/agents-md.js';
 import { createFolders, mergeChat, mergeOrganization, visibleChats } from '/folders.js';
 
 const $ = id => document.getElementById(id);
@@ -49,8 +50,11 @@ const folderSidebar = createFolders({ state: () => ({ folders, chats, activeId, 
     if (!visibleChats(chats, archivedView).some(chat => chat.id === activeId)) selectFirstChat();
     render();
   },
+  onAgents: scope => agentsEditor.open(scope),
   afterRender: controls,
 });
+const agentsEditor = createAgentsEditor({ api });
+$('global-agents').onclick = () => agentsEditor.open();
 const messageInfo = createMessageInfo({ load: (chatId, index) => api(`/api/chats/${chatId}/messages/${index}/metadata`) });
 const messageScroll = createScrollFollow($('messages'));
 $('messages').addEventListener('scroll', () => messageInfo.close());

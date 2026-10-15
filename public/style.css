@@ -109,6 +109,15 @@ nav .organize-item { color: var(--muted); }
 #archive-view[aria-pressed="true"] { background: var(--selected); }
 #archive-notice { color: var(--muted); font-size: 12px; margin: 8px 0; }
 .sidebar-empty { color: var(--muted); font-size: 12px; padding: 8px; }
+#global-agents { text-align: left; font-size: 12px; }
+#agents-dialog { width: min(800px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); overflow: auto; border: 1px solid var(--border); border-radius: 12px; color: var(--text); background: var(--control); padding: 20px; }
+#agents-dialog::backdrop { background: #0006; }
+#agents-form { display: flex; flex-direction: column; gap: 12px; }
+#agents-heading { margin: 0; font-size: 18px; }
+#agents-description, #agents-status, #agents-error { margin: 0; font-size: 12px; line-height: 1.5; }
+#agents-description, #agents-status { color: var(--muted); }
+#agents-error { color: var(--error-text); }
+#agents-content { flex: none; width: 100%; min-height: 140px; height: min(48dvh, 420px); max-height: none; resize: none; overflow: auto; padding: 12px; border: 1px solid var(--border); border-radius: 5px; background: var(--page); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; line-height: 1.5; }
 
 /* Editorial: compact chrome, warm paper/ink palettes, generous text width. */
 :root {

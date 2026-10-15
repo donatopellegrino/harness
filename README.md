@@ -8,6 +8,16 @@ Click an already selected chat again to open its edit dialog. **Archive chat** h
 
 **Delete permanently…** asks “Are you sure?” before removing the chat. Deletion runs in a SQLite transaction and cascades to all its message, input/context, compaction, failed-attempt, and shared-payload rows; it is not a soft delete and has no undo. Other chats, folders, and account state are preserved. Chats that are currently working cannot be archived, restored, or deleted. Historical database backups are independent files and are not modified by chat deletion; this feature does not claim forensic erasure of disk pages or backup copies.
 
+## Chat AGENTS.md
+
+Use **Global AGENTS.md** in the sidebar to edit instructions for every chat. To edit one folder's instructions, click an already selected folder again and choose **Edit folder AGENTS.md**. Markdown is saved as plain text in the SQLite `agents_md` table, with a revision and update time. Empty text clears that scope; documents are limited to 32,000 characters. Concurrent saves reject stale revisions and keep the editor's draft.
+
+Each model request receives only the current global document plus the document belonging to the chat's immediate folder. There is no ancestor, descendant, sibling, or filesystem lookup. Top-level chats receive only global instructions; an empty folder document does not inherit a parent's document. Folder rules take precedence in conflicts with global rules. This database feature is separate from the repository's development `AGENTS.md`.
+
+The harness resends current instructions using the Responses API `instructions` parameter on every reply and manual compaction request, including after automatic compaction. Edits apply to new requests in existing chats; running requests keep their snapshot. Exact sent instructions remain in request metadata, with the source folder IDs and revisions recorded in `agents_md` metadata. Editing instructions does not erase their prior influence from saved replies or opaque compacted context. Instruction text is not appended to the visible transcript or active replay array. See [OpenAI's instructions documentation](https://developers.openai.com/api/docs/guides/text#message-roles-and-instruction-following).
+
+Existing databases gain the empty instruction table at startup without rewriting conversations or changing hierarchy. No instruction text is imported automatically from host or repository files.
+
 ## Run
 
 Requires Node.js 22.13 or later (uses the built-in SQLite driver).

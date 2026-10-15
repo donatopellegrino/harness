@@ -14,6 +14,7 @@
     <div class="sidebar-actions"><button id="new-chat">+ Chat</button><button id="new-folder" type="button">+ Folder</button></div>
     <nav id="chats" aria-label="Chats and folders"></nav>
     <button id="archive-view" type="button" aria-pressed="false">Archived chats</button>
+    <button id="global-agents" type="button">Global AGENTS.md</button>
     <label class="appearance">Appearance
       <span class="select-wrap"><select id="theme">
         <option value="system">System</option>
@@ -33,12 +34,23 @@
       <h2 id="organize-heading">Edit</h2>
       <label>Name <input id="organize-name" required maxlength="120" autocomplete="off"></label>
       <label id="organize-parent-label">Folder <span class="select-wrap"><select id="organize-parent"></select></span></label>
+      <button id="folder-agents" type="button" hidden>Edit folder AGENTS.md</button>
       <div id="chat-actions" class="chat-actions" hidden>
         <button id="archive-chat" type="button">Archive chat</button>
         <button id="delete-chat" class="danger" type="button">Delete permanently…</button>
       </div>
       <p id="organize-error" role="alert" hidden></p>
       <div class="dialog-actions"><button id="organize-cancel" type="button">Cancel</button><button id="organize-save" type="submit">Save</button></div>
+    </form>
+  </dialog>
+  <dialog id="agents-dialog" aria-labelledby="agents-heading" aria-describedby="agents-description">
+    <form id="agents-form">
+      <h2 id="agents-heading">AGENTS.md</h2>
+      <p id="agents-description"></p>
+      <textarea id="agents-content" aria-label="AGENTS.md content" rows="16" maxlength="32000" spellcheck="false"></textarea>
+      <p id="agents-status" role="status"></p>
+      <p id="agents-error" role="alert" hidden></p>
+      <div class="dialog-actions"><button id="agents-cancel" type="button">Cancel</button><button id="agents-save" type="submit" disabled>Save</button></div>
     </form>
   </dialog>
   <dialog id="delete-confirm-dialog" aria-labelledby="delete-confirm-heading" aria-describedby="delete-confirm-text">

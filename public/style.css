@@ -60,7 +60,6 @@ select { max-width: 290px; color: var(--text); }
 .message-info-content summary { cursor: pointer; color: var(--muted); }
 .message-info-content pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; padding: 8px; background: var(--surface); border-radius: 6px; }
 .content { line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 15px; }
-.message.user .content { background: var(--surface); padding: 12px 16px; border-radius: 10px; }
 #composer { display: flex; gap: 12px; align-items: flex-end; width: min(100%, 760px); margin: 0 auto; border: 1px solid var(--border); border-radius: 12px; padding: 12px; }
 textarea { resize: vertical; width: 100%; min-width: 0; max-height: 180px; min-height: 60px; border: 0; background: transparent; line-height: 1.5; padding: 4px; color: inherit; }
 #send { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
@@ -119,6 +118,8 @@ nav .organize-item { color: var(--muted); }
   --heading: #3b3329; --focus: #a34823; --accent: #984722; --accent-text: #fffaf4;
   --fast-bg: #eedeca; --fast-border: #bd8c63; --fast-text: #7b371c;
   --error-bg: #f5e2db; --error-text: #96361f; --shadow: #37271720;
+  --user-bg: #f2dcc9; --user-text: #4b2c1e; --user-border: #e7c4a8;
+  --assistant-bg: #f1eee7; --assistant-border: #e2dbce;
 }
 :root[data-theme="dark"] {
   --text: #ede5d5; --page: #211e1a; --surface: #2a261f; --control: #28231e;
@@ -127,6 +128,8 @@ nav .organize-item { color: var(--muted); }
   --heading: #f2eada; --focus: #eda97c; --accent: #ce8153; --accent-text: #201811;
   --fast-bg: #4c3423; --fast-border: #9b6a44; --fast-text: #efb98c;
   --error-bg: #492c22; --error-text: #f5b7a1; --shadow: #0004;
+  --user-bg: #503524; --user-text: #ffe6d2; --user-border: #775037;
+  --assistant-bg: #2c2924; --assistant-border: #433c32;
 }
 button, select, input { padding: 6px 10px; border-radius: 5px; }
 aside { width: 208px; padding: 14px 10px 10px; gap: 10px; }
@@ -156,10 +159,12 @@ header select { max-width: 230px; }
 .compaction-marker { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 6px 12px; padding: 12px 8px; color: var(--muted); font-size: 12px; border-bottom: 1px solid var(--divider); }
 .compaction-marker span { color: var(--accent); }
 .compaction-marker time { font-size: 11px; }
-.message { display: grid; grid-template-columns: 86px minmax(0, 1fr); gap: 10px; margin-bottom: 0; padding: 12px 0; border-bottom: 1px solid var(--divider); }
-.role { align-self: start; flex-wrap: nowrap; gap: 5px; margin: 0; padding-top: 3px; font-weight: 500; font-size: 12px; }
-.content { font-size: 15px; line-height: 1.55; }
-.message.user .content { background: transparent; padding: 0; border-radius: 0; }
+.message { display: flex; flex-direction: column; align-items: flex-start; gap: 5px; margin-bottom: 0; padding: 10px 0; }
+.message.user { align-items: flex-end; }
+.role { align-self: auto; flex-wrap: nowrap; gap: 5px; margin: 0; font-weight: 500; font-size: 12px; }
+.content { min-width: 0; max-width: 100%; padding: 10px 14px; border: 1px solid var(--assistant-border); border-radius: 10px; background: var(--assistant-bg); font-size: 15px; line-height: 1.55; }
+.message.user .content { max-width: 85%; background: var(--user-bg); color: var(--user-text); border-color: var(--user-border); border-top-right-radius: 3px; }
+.message.assistant .content { border-top-left-radius: 3px; }
 .empty { margin-top: 12vh; }
 .empty h1 { font-family: Georgia, 'Times New Roman', serif; font-weight: 400; }
 #composer { flex-shrink: 0; width: 100%; margin: 10px 0 0; border-radius: 6px; gap: 7px; padding: 8px 10px; background: var(--control); }
@@ -182,7 +187,7 @@ header select { max-width: 230px; }
   main { padding: 0 10px 8px; }
   header { gap: 6px; }
   header select { max-width: 185px; }
-  .message { grid-template-columns: 82px minmax(0, 1fr); gap: 7px; padding: 10px 0; }
+  .message { gap: 5px; padding: 10px 0; }
   #prompt { flex-basis: 100%; width: 100%; font-size: 16px; }
   #context-policy { font-size: 11px; }
 }
@@ -191,7 +196,8 @@ header select { max-width: 230px; }
   .brand { font-size: 22px; }
   .sidebar-actions { flex-direction: column; gap: 4px; }
   .sidebar-actions button { width: 100%; text-align: left; }
-  .message { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+  .message { gap: 4px; }
+  .message.user .content { max-width: 95%; }
   header label, header .select-wrap { max-width: 100%; min-width: 0; }
   header select { max-width: 155px; }
   .context-actions { align-items: flex-start; flex-wrap: wrap; }

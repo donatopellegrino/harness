@@ -9,6 +9,7 @@ import { normalizeModels, resolveModel, responseText, streamReply, latestUsage, 
 import { readableMessageMetadata } from './lib/message-metadata.mjs';
 import { compactionMarkers } from './lib/compaction-markers.mjs';
 import { itemName, folderParent } from './lib/folders.mjs';
+import { privateChatSnapshot } from './lib/private-chats.mjs';
 import { agentsInstructions } from './lib/agents-md.mjs';
 
 const root = dirname(fileURLToPath(import.meta.url));
@@ -21,6 +22,8 @@ const assets = new Map([
   ['/activity.js', ['activity.js', 'text/javascript']],
   ['/folders.js', ['folders.js', 'text/javascript']],
   ['/agents-md.js', ['agents-md.js', 'text/javascript']],
+  ['/private-chats.js', ['private-chats.js', 'text/javascript']],
+  ['/readable-metadata.js', ['../lib/message-metadata.mjs', 'text/javascript']],
   ['/message-info.js', ['message-info.js', 'text/javascript']],
   ['/theme.js', ['theme.js', 'text/javascript']],
 ]);
@@ -38,13 +41,13 @@ const view = chat => ({ ...organizationView(chat), model: chat.model, effort: ch
   compactionMarkers: compactionMarkers(chat.messages, chat.compactions),
   messages: chat.messages.map(({ role, text }) => ({ role, text })) });
 
-export async function readJSON(request) {
+export async function readJSON(request, limit = 128 * 1024) {
   if (request.headers['content-type']?.split(';')[0] !== 'application/json') throw fail('Expected JSON.', 415);
   const chunks = [];
   let size = 0;
   for await (const chunk of request) {
     size += chunk.length;
-    if (size > 128 * 1024) throw fail('Message is too large.', 413);
+    if (size > limit) throw fail('Message is too large.', 413);
     chunks.push(chunk);
   }
   try { return JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { throw fail('Invalid JSON.'); }
@@ -57,6 +60,10 @@ export async function createHarness({ port = 0, directory = join(root, '.data'),
   let origin, catalog = [], catalogAt = 0;
   const running = new Map();
   const inFlightChats = new Map();
+  const privateChats = new WeakSet();
+  const chatView = chat => privateChats.has(chat)
+    ? { ...view(chat), private: true, privateState: { input: chat.input, messages: chat.messages, compactions: chat.compactions ?? [] } }
+    : view(chat);
   const findChat = id => inFlightChats.get(id) ?? store.getChat(id);
   let activityRevision = 0;
   const activity = () => ({ revision: activityRevision, chats: store.listChatHeaders().map(chat => ({ id: chat.id, activity: running.get(chat.id) ?? null })) });
@@ -64,7 +71,8 @@ export async function createHarness({ port = 0, directory = join(root, '.data'),
   const commitChat = (chat, changes) => {
     // SQLite commits messages, context, and metadata together. Publish only
     // after that transaction succeeds; patch the latest stored chat header.
-    Object.assign(chat, store.updateChat(chat.id, changes));
+    if (privateChats.has(chat)) Object.assign(chat, changes);
+    else Object.assign(chat, store.updateChat(chat.id, changes));
   };
 
   async function models() {
@@ -175,18 +183,23 @@ export async function createHarness({ port = 0, directory = join(root, '.data'),
       }
       if (url.pathname === '/api/chats' && request.method === 'POST') {
         const body = request.headers['transfer-encoding'] || Number(request.headers['content-length']) > 0 ? await readJSON(request) : {};
+        if (body?.private !== undefined) throw fail('Private chats must use the temporary chat interface.');
         const folderId = folderParent(store.listFolders(), body?.folderId ?? null);
         const chat = { id: randomUUID(), folderId, title: 'New chat', model: '', effort: 'default', fast: false, messages: [], input: [] };
         store.createChat(chat); return json(response, view(chat), 201);
       }
-      const match = url.pathname.match(/^\/api\/chats\/([\w-]+)(\/(?:messages|compact))?$/);
+      const privateMatch = url.pathname.match(/^\/api\/private\/chats\/(private-[\w-]+)(\/(?:messages|compact))$/);
+      if (privateMatch && request.method !== 'POST') throw fail('Method not allowed.', 405);
+      const match = privateMatch ?? url.pathname.match(/^\/api\/chats\/([\w-]+)(\/(?:messages|compact))?$/);
       if (!match) throw fail('Not found.', 404);
-      let chat = findChat(match[1]);
+      const privateBody = privateMatch ? await readJSON(request, 32 * 1024 * 1024) : null;
+      let chat = privateMatch ? privateChatSnapshot(privateBody?.chat, match[1], store.listFolders()) : findChat(match[1]);
+      if (privateMatch) privateChats.add(chat);
       if (!chat) throw fail('Chat not found.', 404);
       if (running.has(chat.id)) throw fail('This chat is already generating a reply.', 409);
-      const body = await readJSON(request);
+      const body = privateMatch ? privateBody : await readJSON(request);
       if (!body || typeof body !== 'object') throw fail('Expected a JSON object.');
-      chat = findChat(match[1]);
+      chat = privateMatch ? chat : findChat(match[1]);
       if (!chat) throw fail('Chat not found.', 404);
       if (running.has(chat.id)) throw fail('This chat is already generating a reply.', 409);
       if (!match[2] && request.method === 'DELETE') {
@@ -216,7 +229,7 @@ export async function createHarness({ port = 0, directory = join(root, '.data'),
         } else if (typeof body.text !== 'string' || !body.text.trim() || body.text.length > 32000) throw fail('Enter a message of up to 32,000 characters.');
         // Acquire the chat lock before any network await.
         running.set(chat.id, manual ? 'compacting' : 'replying'); activityRevision++;
-        inFlightChats.set(chat.id, chat);
+        if (!privateMatch) inFlightChats.set(chat.id, chat);
         const controller = new AbortController();
         response.on('close', () => { if (!response.writableEnded) controller.abort(); });
         const emit = event => { if (!response.destroyed) response.write(`${JSON.stringify(event)}\n`); };
@@ -276,7 +289,7 @@ export async function createHarness({ port = 0, directory = join(root, '.data'),
           });
           if (checkpoint) emit({ type: 'status', message: `${manual ? 'Context compacted' : 'Context automatically compacted'}. Chat history is preserved.` });
           finishActivity(chat.id);
-          emit({ type: 'done', chat: view(chat) }); response.end();
+          emit({ type: 'done', chat: chatView(chat) }); response.end();
         } catch (error) {
           const diagnosticError = saveFailedAttempt(error.message);
           if (response.headersSent) { emit({ type: 'error', message: error.message + (diagnosticError ? ` (${diagnosticError})` : '') }); response.end(); }

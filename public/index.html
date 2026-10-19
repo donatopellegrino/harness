@@ -12,6 +12,7 @@
   <aside>
     <div class="brand">harness<span>your conversations</span></div>
     <div class="sidebar-actions"><button id="new-chat">+ Chat</button><button id="new-folder" type="button">+ Folder</button></div>
+    <button id="new-private-chat" type="button">◌ Private chat</button>
     <nav id="chats" aria-label="Chats and folders"></nav>
     <button id="archive-view" type="button" aria-pressed="false">Archived chats</button>
     <button id="global-agents" type="button">Global AGENTS.md</button>
@@ -70,6 +71,7 @@
     </header>
     <p id="archive-notice" hidden>Archived chat · Click the selected chat again to restore it or delete it.</p>
     <p id="error" role="alert" hidden></p>
+    <div id="private-notice" role="note" hidden><span>Private · Only in this tab. Closing or reloading discards this chat. Not saved by this harness; messages still go to OpenAI.</span><button id="close-private-chat" type="button">Close private chat</button></div>
     <section id="messages" aria-label="Conversation" aria-live="polite"></section>
     <form id="composer">
       <textarea id="prompt" rows="1" maxlength="32000" placeholder="Message…" aria-label="Message"></textarea>

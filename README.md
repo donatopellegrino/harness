@@ -8,6 +8,16 @@ Click an already selected chat again to open its edit dialog. **Archive chat** h
 
 **Delete permanently…** asks “Are you sure?” before removing the chat. Deletion runs in a SQLite transaction and cascades to all its message, input/context, compaction, failed-attempt, and shared-payload rows; it is not a soft delete and has no undo. Other chats, folders, and account state are preserved. Chats that are currently working cannot be archived, restored, or deleted. Historical database backups are independent files and are not modified by chat deletion; this feature does not claim forensic erasure of disk pages or backup copies.
 
+## Private chats
+
+**Private chat** opens a temporary conversation in the selected folder. It receives the same global and immediate-folder AGENTS.md instructions as a normal chat. A distinct sidebar label and banner identify it. Use **Close private chat** to discard it; switching to another chat keeps it available in the same tab. Click a selected private chat again to rename it in memory. Private chats cannot be archived or converted to saved chats.
+
+Conversation text, active context, encrypted reasoning, compaction state, and message metadata live only in that page's JavaScript memory. They are never written to SQLite, browser storage, or application logs. Reloading, navigating away, signing out, or closing the tab discards them; separate tabs do not see them. The page also clears its private state when entering the browser's back/forward cache. The metadata popup does not cache private metadata.
+
+Each private generation sends its active context to the stateless `/api/private/chats/:id/messages` or `/compact` route. That route uses the normal model/effort/Fast settings and automatic/manual compaction logic but never registers the chat with persistent storage or shared chat lookups. The response returns the next context to the owning page. Closing the page aborts its active private requests. There is no server-side temporary-chat database or cleanup timer to rely on. Private request bodies allow up to 32 MiB; individual user messages retain the ordinary 32,000-character limit.
+
+Messages still go to OpenAI and consume plan usage. Requests use the existing `store: false`; private mode makes no additional promise about OpenAI's retention policies. Account credentials and AGENTS.md settings remain persisted normally, independently of private chat contents.
+
 ## Chat AGENTS.md
 
 Use **Global AGENTS.md** in the sidebar to edit instructions for every chat. To edit one folder's instructions, click an already selected folder again and choose **Edit folder AGENTS.md**. Markdown is saved as plain text in the SQLite `agents_md` table, with a revision and update time. Empty text clears that scope; documents are limited to 32,000 characters. Concurrent saves reject stale revisions and keep the editor's draft.

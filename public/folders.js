@@ -110,6 +110,16 @@ export function createFolders({ state, api, onOrganization, onFolder, onSelectCh
   $('new-folder').onclick = () => edit('folder');
   $('organize-cancel').onclick = () => $('organize-dialog').close();
   $('organize-dialog').addEventListener('cancel', event => { if (saving) event.preventDefault(); });
+  function clearPrivateEditor() {
+    if (!editing?.item?.private) return;
+    editing = null;
+    $('organize-name').value = '';
+    $('organize-error').textContent = ''; $('organize-error').hidden = true;
+    if ($('organize-dialog').open) $('organize-dialog').close();
+  }
+  $('organize-dialog').addEventListener('close', () => {
+    if (!$('organize-dialog').open) clearPrivateEditor();
+  });
   $('organize-form').onsubmit = async event => {
     event.preventDefault(); if (saving || !editing) return;
     const { kind, item } = editing, name = $('organize-name').value.trim(), parent = item ? null : $('organize-parent').value || null;
@@ -208,5 +218,5 @@ export function createFolders({ state, api, onOrganization, onFolder, onSelectCh
       if (node.getAttribute('aria-label') !== label) { node.setAttribute('aria-label', label); node.title = label; }
     }
   }
-  return { render, revealFolder, updateActivity, restoreActiveSelection, selectChat: (id, folderId) => { selected = folderId ?? null; selection = { kind: 'chat', id }; }, selectedFolder: () => selected };
+  return { render, revealFolder, updateActivity, restoreActiveSelection, clearPrivateEditor, selectChat: (id, folderId) => { selected = folderId ?? null; selection = { kind: 'chat', id }; }, selectedFolder: () => selected };
 }

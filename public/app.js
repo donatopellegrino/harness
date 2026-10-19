@@ -59,6 +59,9 @@ const folderSidebar = createFolders({ state: () => ({ folders, chats, activeId, 
   afterRender: controls,
 });
 const agentsEditor = createAgentsEditor({ api });
+function clearPrivateChats() {
+  folderSidebar.clearPrivateEditor(); privateChats.clear();
+}
 $('global-agents').onclick = () => agentsEditor.open();
 const messageInfo = createMessageInfo({ load: (chatId, index) => api(`/api/chats/${chatId}/messages/${index}/metadata`) });
 const messageScroll = createScrollFollow($('messages'));
@@ -200,7 +203,7 @@ function render() {
 async function refresh() {
   const state = await api('/api/state');
   if (account.connected && (!state.auth.connected || state.auth.email !== account.email)) {
-    privateChats.clear(); messageInfo.close(); showError(''); $('prompt').value = '';
+    clearPrivateChats(); messageInfo.close(); showError(''); $('prompt').value = '';
   }
   chats = [...state.chats, ...privateChats.list()]; folders = state.folders ?? []; account = state.auth; applyActivity(state.activity);
   $('account-status').textContent = account.connected ? `${account.email ?? 'Connected'}\n${account.sharing ? 'Using ChatGPT plan' : 'Plan usage not enabled'}` : 'Not connected';
@@ -237,7 +240,7 @@ async function saveSettings() {
 $('new-private-chat').onclick = safely(() => newChat({ privateMode: true }));
 $('close-private-chat').onclick = () => {
   if (busy || savingSettings || !active()?.private) return;
-  const id = activeId; privateChats.close(id); chats = chats.filter(chat => chat.id !== id);
+  const id = activeId; folderSidebar.clearPrivateEditor(); privateChats.close(id); chats = chats.filter(chat => chat.id !== id);
   activities.delete(id); showError(''); selectFirstChat(); render();
 };
 $('new-chat').onclick = safely(newChat);
@@ -263,7 +266,7 @@ $('speed').onclick = safely(async () => {
 $('login').onclick = safely(async () => { const { url } = await api('/api/login', 'POST'); window.location.assign(url); });
 $('logout').onclick = safely(async () => {
   const result = await api('/api/logout', 'POST');
-  privateChats.clear(); chats = chats.filter(chat => !chat.private); messageInfo.close(); showError('');
+  clearPrivateChats(); chats = chats.filter(chat => !chat.private); messageInfo.close(); showError('');
   await refresh();
   if (!result.revoked) showError('Signed out locally. Remote revocation was not confirmed; disconnect Basic Harness in ChatGPT settings.');
 });
@@ -471,7 +474,7 @@ document.addEventListener('visibilitychange', checkActivity);
 window.addEventListener('pagehide', () => {
   const wasPrivate = active()?.private;
   showError(''); messageInfo.close();
-  privateChats.clear(); chats = chats.filter(chat => !chat.private);
+  clearPrivateChats(); chats = chats.filter(chat => !chat.private);
   if (wasPrivate) { activeId = undefined; $('prompt').value = ''; render(); }
   else renderChats();
 });

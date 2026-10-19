@@ -212,7 +212,7 @@ export async function createHarness({ port = 0, directory = join(root, '.data'),
       const privateChat = scoped ? jobs.privateChat(scoped[1], request.headers['x-private-chat-token']) : null;
       if (scoped && !privateChat) throw fail('Private chat expired or is unavailable.', 404);
       const path = scoped ? `/api/chats/${scoped[1]}${scoped[2]}` : url.pathname;
-      const scopedChat = id => privateChat?.id === id ? privateChat : findChat(id);
+      const scopedChat = id => privateChat?.id === id ? jobs.privateChat(id, request.headers['x-private-chat-token']) : findChat(id);
       if (url.pathname === '/api/private/chats' && request.method === 'POST') {
         const body = await readJSON(request);
         const folderId = folderParent(store.listFolders(), body?.folderId ?? null);

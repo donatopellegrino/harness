@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { request as httpRequest } from 'node:http';
 import { join } from 'node:path';
 import { Store } from '../lib/store.mjs';
 import { createHarness } from '../server.mjs';
@@ -17,13 +18,15 @@ const complete = checkpoint => new Response(`data: ${JSON.stringify({ type: 'res
 const dump = store => JSON.stringify(store.db.prepare("SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name").all()
   .map(({ name }) => [name, store.db.prepare(`SELECT * FROM "${name}" ORDER BY rowid`).all()]));
 
-async function fixture(t, respond = () => complete(false)) {
+const modelCatalog = () => Response.json({ models: [{ slug: 'fixture-model', supported_reasoning_efforts: ['high'], max_context_window: 20000 }] });
+
+async function fixture(t, respond = () => complete(false), loadModels = modelCatalog) {
   const directory = mkdtempSync(join(tmpdir(), 'harness-private-backend-')), store = new Store(directory), sent = [];
   store.createFolder({ id: 'parent', name: 'Parent', parentId: null }); store.createFolder({ id: 'child', name: 'Child', parentId: 'parent' });
   store.saveAgentsMd(null, 'GLOBAL_RULE', 0); store.saveAgentsMd('parent', 'PARENT_RULE', 0); store.saveAgentsMd('child', 'DIRECT_RULE', 0);
   const app = await createHarness({ directory, auth: { status: () => ({ connected: true, sharing: true }), accessToken: async () => 'fixture-token' },
     fetcher: async (url, options) => {
-      if (url.endsWith('/models')) return Response.json({ models: [{ slug: 'fixture-model', supported_reasoning_efforts: ['high'], max_context_window: 20000 }] });
+      if (url.endsWith('/models')) return loadModels();
       sent.push(JSON.parse(options.body)); return respond(sent.at(-1), options);
     } });
   t.after(async () => { await app.jobs.idle(); app.server.closeAllConnections(); await new Promise(resolve => app.server.close(resolve)); store.close(); rmSync(directory, { recursive: true, force: true }); });
@@ -97,17 +100,19 @@ test('private ownership, fixed folder and validation remain on the backend', asy
   assert.equal(f.store.listChats().length, 0);
 });
 
-test('private expiry is a backend policy and never expires active work', async t => {
+test('private chats expire after five idle minutes, while active work gets a fresh idle period on completion', async t => {
   const directory = mkdtempSync(join(tmpdir(), 'harness-private-expiry-')), store = new Store(directory);
   let now = 0, release;
   const held = new Promise(resolve => { release = resolve; });
-  const jobs = new ChatOperations({ store, now: () => now, privateTtl: 1000, execute: async () => { await held; return {}; } });
+  const jobs = new ChatOperations({ store, now: () => now, execute: async () => { await held; return {}; } });
   t.after(async () => { release(); await jobs.idle(); jobs.dispose(); store.close(); rmSync(directory, { recursive: true, force: true }); });
-  const first = jobs.createPrivate(null); now = 1001; jobs.reap(); assert.equal(jobs.privateChat(first.chat.id, first.token), null);
+  const first = jobs.createPrivate(null); now = 5 * 60 * 1000 - 1; jobs.reap(); assert.ok(jobs.privateChats.has(first.chat.id));
+  now++; jobs.reap(); assert.equal(jobs.privateChat(first.chat.id, first.token), null);
   const active = jobs.createPrivate(null);
   jobs.start({ chat: active.chat, kind: 'reply', requestId: 'fixture', commandHash: 'fixture', request: { model: 'test', effort: 'default', fast: false, text: secret } });
-  now += 10000; jobs.reap(); assert.ok(jobs.privateChat(active.chat.id, active.token));
-  release(); await jobs.idle(); now += 1001; jobs.reap(); assert.equal(jobs.privateChat(active.chat.id, active.token), null);
+  now += 10 * 60 * 1000; jobs.reap(); assert.ok(jobs.privateChat(active.chat.id, active.token));
+  release(); await jobs.idle(); now += 5 * 60 * 1000 - 1; jobs.reap(); assert.ok(jobs.privateChats.has(active.chat.id));
+  now++; jobs.reap(); assert.equal(jobs.privateChat(active.chat.id, active.token), null);
 });
 
 test('private browser client sends commands to backend and forgetting the page sends no cancellation or deletion', async () => {
@@ -121,4 +126,43 @@ test('private browser client sends commands to backend and forgetting the page s
   assert.equal(sent[1].path, `/api/private/chats/${chat.id}`); assert.equal(sent[1].options.headers['X-Private-Chat-Token'], 'capability');
   const count = sent.length; client.clear(); assert.equal(sent.length, count); assert.equal(client.list().length, 0);
   assert.equal(createPrivateChats().list().length, 0);
+});
+
+test('a private command still uploading must be rejected if its capability is closed or expires before acceptance', async t => {
+  for (const mode of ['closed', 'expired']) await t.test(mode, async t => {
+    const f = await fixture(t); let now = 0;
+    f.app.jobs.now = () => now; await f.scoped();
+    const body = JSON.stringify({ requestId: 'late-upload', kind: 'reply', text: secret, model: 'fixture-model', effort: 'high', fast: false });
+    const received = new Promise(resolve => f.app.server.once('request', resolve));
+    let upload;
+    const finished = new Promise((resolve, reject) => {
+      upload = httpRequest(f.app.origin + f.path + '/operations', { method: 'POST', headers: { ...f.headers, ...f.token } }, response => {
+        response.resume(); response.on('end', () => resolve(response.statusCode));
+      });
+      upload.on('error', reject); upload.write(body.slice(0, 1));
+    });
+    try {
+      await received;
+      if (mode === 'closed') assert.equal((await f.scoped('', 'DELETE', {})).status, 200);
+      else now = 5 * 60 * 1000;
+      upload.end(body.slice(1));
+      assert.equal(await finished, 404);
+      await f.app.jobs.idle();
+      assert.equal(f.sent.length, 0); assert.equal(f.app.jobs.privateOperations.size, 0);
+    } finally { upload.destroy(); }
+  });
+});
+
+test('private settings revalidate their capability after waiting for the model catalog', async t => {
+  let release, started;
+  const held = new Promise(resolve => { release = resolve; });
+  const fetching = new Promise(resolve => { started = resolve; });
+  const f = await fixture(t, undefined, async () => { started(); await held; return modelCatalog(); });
+  try {
+    const pending = f.scoped('', 'PATCH', { model: 'fixture-model', effort: 'high', fast: true });
+    await fetching;
+    assert.equal((await f.scoped('', 'DELETE', {})).status, 200);
+    release(); assert.equal((await pending).status, 404);
+    assert.equal(f.sent.length, 0); assert.equal((await f.scoped()).status, 404);
+  } finally { release(); }
 });

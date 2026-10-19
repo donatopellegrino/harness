@@ -32,13 +32,17 @@ test('activity follows reply and compaction lifecycle, clears after errors, and 
     const status = await (await call('/api/activity')).json();
     assert.equal(status.chats[0].activity, mode === 'compacting' ? 'compacting' : 'replying');
     assert.ok(status.revision > revision);
-    assert.deepEqual(Object.keys(status.chats[0]).sort(), ['activity', 'id']);
+    assert.deepEqual(Object.keys(status.chats[0]).sort(), ['activity', 'id', 'operationId', 'operationStatus']);
+    assert.equal(status.chats[0].operationStatus, 'running');
+    assert.match(status.chats[0].operationId, /^[a-f0-9-]{36}$/);
     assert.equal((await (await call('/api/state')).json()).activity.chats[0].activity, status.chats[0].activity);
     release(mode === 'failure' ? Response.json({ error: { message: 'Synthetic failure' } }, { status: 500 }) : sse({ type: 'response.completed', response: { status: 'completed', output: mode === 'compacting' ? [{ type: 'compaction', encrypted_content: 'synthetic-checkpoint' }, answer] : [answer] } }));
     const events = (await stream.text()).trim().split('\n').map(JSON.parse);
     assert.equal(events.at(-1).type, mode === 'failure' ? 'error' : 'done');
     const after = await (await call('/api/activity')).json();
     assert.equal(after.chats[0].activity, null); assert.ok(after.revision > status.revision); revision = after.revision;
+    assert.equal(after.chats[0].operationId, status.chats[0].operationId);
+    assert.equal(after.chats[0].operationStatus, mode === 'failure' ? 'failed' : 'completed');
     assert.equal(store.listChats()[0].activity, undefined);
   }
 });

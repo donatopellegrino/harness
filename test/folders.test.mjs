@@ -199,3 +199,14 @@ test('a delayed rename body uses the latest organization version and shares a re
   assert.equal(events.at(-1).chat.title, 'Delayed custom name');
   assert.equal(f.store.getChat('old').title, 'Delayed custom name');
 });
+
+test('delayed operation snapshots cannot rewind progress, completion, or a newer operation', () => {
+  const base = { id: 'chat', title: 'Chat', folderId: null, archived: false, messages: [], organizationVersion: 0 };
+  const running = { ...base, operation: { id: 'first', order: 1, revision: 5, status: 'running', text: 'Latest partial' } };
+  const older = { ...base, operation: { id: 'first', order: 1, revision: 2, status: 'running', text: 'Old partial' } };
+  assert.deepEqual(mergeChat(running, older).operation, running.operation);
+  const completed = { ...base, messages: [{ role: 'assistant', text: 'Final' }], operation: { id: 'first', order: 1, revision: 6, status: 'completed' } };
+  assert.deepEqual(mergeChat(completed, running), completed);
+  const next = { ...completed, operation: { id: 'second', order: 2, revision: 0, status: 'queued' } };
+  assert.deepEqual(mergeChat(next, completed), next);
+});

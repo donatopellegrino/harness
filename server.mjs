@@ -1,6 +1,6 @@
 import { createServer } from 'node:http';
 import { readFileSync } from 'node:fs';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID, createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { ChatGPTAuth } from './lib/auth.mjs';
@@ -9,7 +9,7 @@ import { normalizeModels, resolveModel, responseText, streamReply, latestUsage, 
 import { readableMessageMetadata } from './lib/message-metadata.mjs';
 import { compactionMarkers } from './lib/compaction-markers.mjs';
 import { itemName, folderParent } from './lib/folders.mjs';
-import { privateChatSnapshot } from './lib/private-chats.mjs';
+import { ChatOperations, activeOperation, operationView } from './lib/chat-operations.mjs';
 import { agentsInstructions } from './lib/agents-md.mjs';
 
 const root = dirname(fileURLToPath(import.meta.url));
@@ -25,6 +25,7 @@ const assets = new Map([
   ['/agents-md.js', ['agents-md.js', 'text/javascript']],
   ['/private-chats.js', ['private-chats.js', 'text/javascript']],
   ['/chat-navigation.js', ['chat-navigation.js', 'text/javascript']],
+  ['/operations.js', ['operations.js', 'text/javascript']],
   ['/readable-metadata.js', ['../lib/message-metadata.mjs', 'text/javascript']],
   ['/message-info.js', ['message-info.js', 'text/javascript']],
   ['/theme.js', ['theme.js', 'text/javascript']],
@@ -60,22 +61,115 @@ export async function createHarness({ port = 0, directory = join(root, '.data'),
   auth ??= new ChatGPTAuth(store);
   const cookie = `harness_session=${randomBytes(32).toString('hex')}`;
   let origin, catalog = [], catalogAt = 0;
-  const running = new Map();
-  const inFlightChats = new Map();
-  const privateChats = new WeakSet();
-  const chatView = chat => privateChats.has(chat)
-    ? { ...view(chat), private: true, privateState: { input: chat.input, messages: chat.messages, compactions: chat.compactions ?? [] } }
-    : view(chat);
-  const findChat = id => inFlightChats.get(id) ?? store.getChat(id);
-  let activityRevision = 0;
-  const activity = () => ({ revision: activityRevision, chats: store.listChatHeaders().map(chat => ({ id: chat.id, activity: running.get(chat.id) ?? null })) });
-  const finishActivity = id => { if (running.delete(id)) { inFlightChats.delete(id); activityRevision++; } };
+  const activityInstance = randomUUID();
+  let activityRevision = 0, activeRequests = 0, serverClosed = false, storeClosed = false;
+  const maybeClose = () => {
+    if (serverClosed && !activeRequests && !jobs.tasks.size && !storeClosed) {
+      storeClosed = true; jobs.dispose(); store.close();
+    }
+  };
+  const jobs = new ChatOperations({ store, execute: executeOperation, onChange: () => { activityRevision++; maybeClose(); } });
+  const findChat = id => jobs.chat(id);
+  const chatView = chat => ({ ...view(chat), ...(chat.private ? { private: true } : {}), operation: operationView(jobs.latest(chat)) });
+  const activity = () => ({ instance: activityInstance, revision: activityRevision, chats: store.listChatHeaders().map(chat => {
+    const operation = jobs.latest(chat);
+    return { id: chat.id, activity: activeOperation(operation) ? operation.kind === 'compaction' ? 'compacting' : 'replying' : null,
+      operationId: operation?.id ?? null, operationStatus: operation?.status ?? null };
+  }) });
   const commitChat = (chat, changes) => {
-    // SQLite commits messages, context, and metadata together. Publish only
-    // after that transaction succeeds; patch the latest stored chat header.
-    if (privateChats.has(chat)) Object.assign(chat, changes);
+    if (chat.private) Object.assign(chat, changes);
     else Object.assign(chat, store.updateChat(chat.id, changes));
   };
+  function startCommand(chat, body, newChat = false) {
+    const kind = body.kind ?? 'reply', manual = kind === 'compaction';
+    if (!['reply', 'compaction'].includes(kind)) throw fail('Choose reply or compaction.');
+    if (manual ? !chat.input.length : typeof body.text !== 'string' || !body.text.trim() || body.text.length > 32000)
+      throw fail(manual ? 'Send a message before compacting this chat.' : 'Enter a message of up to 32,000 characters.');
+    const requestId = body.requestId ?? randomUUID();
+    if (typeof requestId !== 'string' || !/^[\w-]{1,128}$/.test(requestId)) throw fail('Invalid request ID.');
+    const commandHash = createHash('sha256').update(JSON.stringify({ chatId: newChat ? null : chat.id, folderId: newChat ? body.folderId ?? null : chat.folderId ?? null,
+      kind, text: manual ? null : body.text.trim(), model: body.model ?? null, effort: body.effort ?? null, fast: body.fast ?? null })).digest('hex');
+    const prior = jobs.prior(requestId, chat.private ? chat : null);
+    if (prior) {
+      if (prior.command_hash !== commandHash) throw fail('This request ID was already used for a different command.', 409);
+      return prior;
+    }
+    if (chat.archived) throw fail('Restore this archived chat before starting an operation.', 409);
+    if (jobs.running.has(chat.id)) throw fail('This chat is already working.', 409);
+    const model = body.model ?? chat.model, effort = body.effort ?? chat.effort, fast = body.fast ?? chat.fast ?? false;
+    if (typeof model !== 'string' || !model || typeof effort !== 'string' || typeof fast !== 'boolean') throw fail('Choose a model and effort.');
+    const agents = store.agentsForChat(chat.folderId ?? null);
+    return jobs.start({ chat, newChat, requestId, commandHash, kind,
+      request: { model, effort, fast, ...(manual ? {} : { text: body.text.trim() }), instructions: agentsInstructions(agents),
+        agents: agents.map(({ folderId, revision, updatedAt }) => ({ folderId, revision, updatedAt })) } });
+  }
+  async function executeOperation(record, chat, { delta, status, notice }) {
+    const manual = record.kind === 'compaction', request = record.request;
+    let metadata;
+    try {
+      const selected = resolveModel(await models(), request.model);
+      if (request.effort !== 'default' && !selected.efforts.includes(request.effort)) throw fail('Choose a supported effort.');
+      const token = await auth.accessToken(), threshold = manual ? 1000 : autoCompactThreshold(selected);
+      if (manual) status('Compacting context… This can take a few minutes.');
+      const input = manual ? chat.input : [...chat.input, { role: 'user', content: request.text }];
+      const output = await streamReply({ fetcher, token, model: request.model, effort: request.effort, fast: request.fast,
+        input, instructions: request.instructions, compactThreshold: threshold, requireMessage: !manual,
+        signal: new AbortController().signal,
+        onDelta: text => { if (!manual) delta(text); },
+        onCompaction: () => status('Compacted context received; finishing the operation…'),
+        onServiceTier: tier => { if (request.fast && tier === 'default') notice('Fast mode was requested, but OpenAI used Standard processing for this reply.'); },
+        onMetadata: value => { metadata = { ...value, operation_id: record.id, request_id: record.request_id, agents_md: request.agents }; },
+      });
+      const checkpoint = output.findLast(item => item.type === 'compaction');
+      const nextInput = compactedInput([...input, ...output]);
+      if (manual && !checkpoint) throw fail('Nothing to compact: OpenAI requires at least 1,000 context tokens, or this model did not return a compaction. History was not changed.');
+      const compactions = checkpoint ? [...(chat.compactions ?? []), {
+        mode: manual ? 'manual' : 'automatic', model: request.model, threshold,
+        completed_at: metadata.finished_at, response_id: metadata.response?.id,
+        after_message_count: chat.messages.length + (manual ? 0 : 2), previous_input: chat.input,
+        ...(manual ? { metadata } : {}),
+      }] : chat.compactions;
+      if (checkpoint) status(`${manual ? 'Context compacted' : 'Context automatically compacted'}. Chat history is preserved.`);
+      return manual ? { input: [checkpoint], compactions,
+        contextUsage: latestUsage([{ role: 'assistant', metadata }]), contextUsageSource: 'compaction' } : {
+        input: nextInput, compactions, contextUsage: null, contextUsageSource: 'reply',
+        messages: [...chat.messages, { role: 'user', text: request.text, metadata: { sent_at: metadata.started_at, request: metadata.request } },
+          { role: 'assistant', text: responseText(output), metadata }],
+        title: chat.messages.length === 0 && !chat.titleEdited ? request.text.replace(/\s+/g, ' ').slice(0, 60) : chat.title,
+      };
+    } catch (error) {
+      if (metadata) error.attempt = { ...(manual ? { operation: 'compaction' } : { text: request.text }), error: error.message, metadata };
+      throw error;
+    }
+  }
+  function observe(record, chat, response, legacy = false) {
+    response.writeHead(200, { 'Content-Type': 'application/x-ndjson', 'X-Accel-Buffering': 'no' }); response.flushHeaders();
+    let sent = '', ended = false;
+    const send = event => { if (!response.destroyed && response.writableLength < 1024 * 1024) response.write(JSON.stringify(event) + '\n'); else response.destroy(); };
+    const listener = event => {
+      if (ended || response.destroyed) return;
+      const snapshot = event.operation;
+      if (legacy) {
+        if (snapshot.text && snapshot.text !== sent) { send({ type: 'delta', text: snapshot.text.slice(sent.length) }); sent = snapshot.text; }
+        if (snapshot.message) send({ type: 'status', message: snapshot.message });
+        if (snapshot.notice) send({ type: 'notice', message: snapshot.notice });
+        if (!activeOperation(snapshot)) {
+          send(snapshot.status === 'completed' ? { type: 'done', chat: chatView(event.chat ?? chat) } : { type: 'error', message: snapshot.error });
+          ended = true; response.end();
+        }
+      } else {
+        send({ ...event, ...(event.chat ? { chat: chatView(event.chat) } : {}) });
+        if (!activeOperation(snapshot)) { ended = true; response.end(); }
+      }
+    };
+    const unsubscribe = jobs.subscribe(record.id, listener);
+    const heartbeat = setInterval(() => { if (!response.destroyed) response.write('\n'); }, 15000); heartbeat.unref();
+    const cleanup = () => { unsubscribe(); clearInterval(heartbeat); };
+    response.on('close', cleanup);
+    const current = jobs.record(record.id, chat.private) ?? record;
+    listener({ type: 'operation', operation: operationView(current), chat });
+    if (ended) cleanup();
+  }
 
   async function models() {
     const token = await auth.accessToken();
@@ -87,7 +181,6 @@ export async function createHarness({ port = 0, directory = join(root, '.data'),
     return catalog;
   }
 
-  let activeRequests = 0, serverClosed = false;
   const server = createServer(async (request, response) => {
     activeRequests++;
     response.setHeader('Cache-Control', 'no-store');
@@ -115,7 +208,51 @@ export async function createHarness({ port = 0, directory = join(root, '.data'),
       if (request.headers.origin && request.headers.origin !== origin) throw fail('Cross-origin requests are not allowed.', 403);
       if (request.method !== 'GET' && request.headers.origin !== origin) throw fail('A same-origin request is required.', 403);
 
-      if (url.pathname === '/api/state' && request.method === 'GET') return json(response, { auth: auth.status(), chats: store.listChatsForDisplay().map(view), folders: store.listFolders(), activity: activity() });
+      const scoped = url.pathname.match(/^\/api\/private\/chats\/([\w-]+)(.*)$/);
+      const privateChat = scoped ? jobs.privateChat(scoped[1], request.headers['x-private-chat-token']) : null;
+      if (scoped && !privateChat) throw fail('Private chat expired or is unavailable.', 404);
+      const path = scoped ? `/api/chats/${scoped[1]}${scoped[2]}` : url.pathname;
+      const scopedChat = id => privateChat?.id === id ? privateChat : findChat(id);
+      if (url.pathname === '/api/private/chats' && request.method === 'POST') {
+        const body = await readJSON(request);
+        const folderId = folderParent(store.listFolders(), body?.folderId ?? null);
+        const created = jobs.createPrivate(folderId);
+        return json(response, { chat: chatView(created.chat), token: created.token }, 201);
+      }
+      if (url.pathname === '/api/operations' && request.method === 'POST') {
+        const body = await readJSON(request);
+        if (!body || typeof body !== 'object' || Array.isArray(body) || body.private !== undefined) throw fail('Expected a saved-chat operation command.');
+        let chat = body.chatId ? findChat(body.chatId) : null;
+        const prior = typeof body.requestId === 'string' ? jobs.prior(body.requestId) : null;
+        if (prior && !body.chatId) {
+          chat = { ...findChat(prior.chat_id), id: prior.chat_id };
+          const record = startCommand(chat, body, true);
+          return json(response, { operation: operationView(record), chat: chatView(chat) }, 202);
+        }
+        if (body.chatId && !chat) throw fail('Chat not found.', 404);
+        if (!chat) chat = { id: randomUUID(), folderId: folderParent(store.listFolders(), body.folderId ?? null), title: 'New chat', model: '', effort: 'default', messages: [], input: [] };
+        const record = startCommand(chat, body, !body.chatId);
+        return json(response, { operation: operationView(record), chat: chatView(findChat(record.chat_id)) }, 202);
+      }
+      const requestMatch = path.match(/^\/api\/operations\/requests\/([\w-]+)$/);
+      if (requestMatch && request.method === 'GET') {
+        const record = jobs.prior(requestMatch[1]); if (!record) throw fail('Command was not accepted.', 404);
+        const chat = findChat(record.chat_id);
+        return json(response, { operation: operationView(record), chat: chatView(chat) });
+      }
+      const operationMatch = path.match(/^\/api\/chats\/([\w-]+)\/operations\/([\w-]+)(\/events)?$/);
+      if (operationMatch && request.method === 'GET') {
+        const chat = scopedChat(operationMatch[1]), record = jobs.record(operationMatch[2], !!privateChat);
+        if (!chat || !record || record.chat_id !== chat.id) throw fail('Operation not found.', 404);
+        if (operationMatch[3]) return observe(record, chat, response);
+        return json(response, { operation: operationView(record), chat: chatView(chat) });
+      }
+      const getChatMatch = path.match(/^\/api\/chats\/([\w-]+)$/);
+      if (getChatMatch && request.method === 'GET') {
+        const chat = scopedChat(getChatMatch[1]); if (!chat) throw fail('Chat not found.', 404);
+        return json(response, chatView(chat));
+      }
+      if (url.pathname === '/api/state' && request.method === 'GET') return json(response, { auth: auth.status(), chats: store.listChatsForDisplay().map(chatView), folders: store.listFolders(), activity: activity() });
       if (url.pathname === '/api/activity' && request.method === 'GET') return json(response, activity());
       if (url.pathname === '/api/account' && request.method === 'GET') return json(response, auth.status());
       if (url.pathname === '/api/models' && request.method === 'GET') return json(response, { models: await models() });
@@ -131,9 +268,9 @@ export async function createHarness({ port = 0, directory = join(root, '.data'),
         }
         throw fail('Method not allowed.', 405);
       }
-      const metadataMatch = url.pathname.match(/^\/api\/chats\/([\w-]+)\/messages\/(\d+)\/metadata$/);
+      const metadataMatch = path.match(/^\/api\/chats\/([\w-]+)\/messages\/(\d+)\/metadata$/);
       if (metadataMatch && request.method === 'GET') {
-        const chat = findChat(metadataMatch[1]);
+        const chat = scopedChat(metadataMatch[1]);
         const index = Number(metadataMatch[2]);
         if (!chat || !Number.isSafeInteger(index)) throw fail('Message not found.', 404);
         const data = readableMessageMetadata(chat, index);
@@ -141,11 +278,11 @@ export async function createHarness({ port = 0, directory = join(root, '.data'),
         return json(response, data);
       }
       if (url.pathname === '/api/login' && request.method === 'POST') {
-        if (running.size) throw fail('Wait for the reply to finish first.', 409);
+        if (jobs.running.size) throw fail('Wait for the reply to finish first.', 409);
         return json(response, { url: await auth.begin(origin) });
       }
       if (url.pathname === '/api/logout' && request.method === 'POST') {
-        if (running.size) throw fail('Wait for the reply to finish first.', 409);
+        if (jobs.running.size) throw fail('Wait for the reply to finish first.', 409);
         const result = await auth.logout(); catalog = []; catalogAt = 0;
         return json(response, result);
       }
@@ -164,20 +301,21 @@ export async function createHarness({ port = 0, directory = join(root, '.data'),
         const changes = { name: itemName(body.name) };
         return json(response, store.updateFolder(folder.id, changes));
       }
-      const organizationMatch = url.pathname.match(/^\/api\/chats\/([\w-]+)\/organization$/);
+      const organizationMatch = path.match(/^\/api\/chats\/([\w-]+)\/organization$/);
       if (organizationMatch && request.method === 'PATCH') {
-        let chat = findChat(organizationMatch[1]);
+        let chat = scopedChat(organizationMatch[1]);
         if (!chat) throw fail('Chat not found.', 404);
         const body = await readJSON(request);
         if (!body || typeof body !== 'object') throw fail('Expected a JSON object.');
+        if (chat.private && 'archived' in body) throw fail('Private chats cannot be archived.');
         if ('folderId' in body) throw fail('A chat\'s container is fixed at creation. Existing chats cannot be moved.');
         if (!('title' in body) && !('archived' in body)) throw fail('Provide a name or archive state.');
         if ('archived' in body && typeof body.archived !== 'boolean') throw fail('Archive state must be on or off.');
         // A reply or another rename may start while the body is arriving.
         // Re-read the current header or share that reply's in-flight object.
-        chat = findChat(organizationMatch[1]);
+        chat = scopedChat(organizationMatch[1]);
         if (!chat) throw fail('Chat not found.', 404);
-        if ('archived' in body && running.has(chat.id)) throw fail('Wait for this chat to finish working before archiving or restoring it.', 409);
+        if ('archived' in body && jobs.running.has(chat.id)) throw fail('Wait for this chat to finish working before archiving or restoring it.', 409);
         // Organization is independent of generation settings and can change during a reply.
         commitChat(chat, { ...('title' in body ? { title: itemName(body.title), titleEdited: true } : {}),
           ...('archived' in body ? { archived: body.archived } : {}),
@@ -189,116 +327,41 @@ export async function createHarness({ port = 0, directory = join(root, '.data'),
         if (body?.private !== undefined) throw fail('Private chats must use the temporary chat interface.');
         const folderId = folderParent(store.listFolders(), body?.folderId ?? null);
         const chat = { id: randomUUID(), folderId, title: 'New chat', model: '', effort: 'default', fast: false, messages: [], input: [] };
-        store.createChat(chat); return json(response, view(chat), 201);
+        store.createChat(chat); return json(response, chatView(chat), 201);
       }
-      const privateMatch = url.pathname.match(/^\/api\/private\/chats\/(private-[\w-]+)(\/(?:messages|compact))$/);
-      if (privateMatch && request.method !== 'POST') throw fail('Method not allowed.', 405);
-      const match = privateMatch ?? url.pathname.match(/^\/api\/chats\/([\w-]+)(\/(?:messages|compact))?$/);
+      const match = path.match(/^\/api\/chats\/([\w-]+)(\/(?:messages|compact|operations))?$/);
       if (!match) throw fail('Not found.', 404);
-      const privateBody = privateMatch ? await readJSON(request, 32 * 1024 * 1024) : null;
-      let chat = privateMatch ? privateChatSnapshot(privateBody?.chat, match[1], store.listFolders()) : findChat(match[1]);
-      if (privateMatch) privateChats.add(chat);
-      if (!chat) throw fail('Chat not found.', 404);
-      if (running.has(chat.id)) throw fail('This chat is already generating a reply.', 409);
-      const body = privateMatch ? privateBody : await readJSON(request);
-      if (!body || typeof body !== 'object') throw fail('Expected a JSON object.');
-      chat = privateMatch ? chat : findChat(match[1]);
-      if (!chat) throw fail('Chat not found.', 404);
-      if (running.has(chat.id)) throw fail('This chat is already generating a reply.', 409);
-      if (!match[2] && request.method === 'DELETE') {
-        if (body.confirmed !== true) throw fail('Confirm permanent deletion first.');
-        store.deleteChat(chat.id);
-        activityRevision++;
-        return json(response, { deleted: chat.id });
+      let chat = scopedChat(match[1]); if (!chat) throw fail('Chat not found.', 404);
+      const body = await readJSON(request);
+      if (!body || typeof body !== 'object' || Array.isArray(body)) throw fail('Expected a JSON object.');
+      chat = scopedChat(match[1]); if (!chat) throw fail('Chat not found.', 404);
+      if (!match[2] && request.method === 'DELETE' && chat.private) {
+        jobs.forgetPrivate(chat.id); return json(response, { deleted: chat.id });
       }
-      if (chat.archived === true) throw fail('Restore this archived chat before changing settings, sending messages, or compacting it.', 409);
-      const manual = match[2] === '/compact';
+      if (!match[2] && request.method === 'DELETE') {
+        if (jobs.running.has(chat.id)) throw fail('This chat is already working.', 409);
+        if (body.confirmed !== true) throw fail('Confirm permanent deletion first.');
+        store.deleteChat(chat.id); activityRevision++; return json(response, { deleted: chat.id });
+      }
+      if (chat.archived) throw fail('Restore this archived chat before changing settings, sending messages, or compacting it.', 409);
       if (!match[2] && request.method === 'PATCH') {
+        if (jobs.running.has(chat.id)) throw fail('This chat is already working.', 409);
         if (typeof body.model !== 'string' || typeof body.effort !== 'string') throw fail('Choose a model and effort.');
         if (body.fast !== undefined && typeof body.fast !== 'boolean') throw fail('Fast mode must be on or off.');
         const selected = resolveModel(await models(), body.model);
         if (body.effort !== 'default' && !selected.efforts.includes(body.effort)) throw fail('Choose a supported effort.');
-        // Loading the catalog can overlap an archive or permanent deletion.
-        chat = findChat(match[1]);
-        if (!chat) throw fail('Chat not found.', 404);
-        if (chat.archived === true) throw fail('Restore this archived chat before changing settings.', 409);
-        if (running.has(chat.id)) throw fail('This chat is already generating a reply.', 409);
+        chat = scopedChat(match[1]); if (!chat) throw fail('Chat not found.', 404);
+        if (chat.archived || jobs.running.has(chat.id)) throw fail('This chat is archived or working.', 409);
         commitChat(chat, { model: body.model, effort: body.effort, ...(body.fast !== undefined ? { fast: body.fast } : {}) });
-        return json(response, view(chat));
+        return json(response, chatView(chat));
       }
       if (match[2] && request.method === 'POST') {
-        if (manual) {
-          if (!chat.input.length) throw fail('Send a message before compacting this chat.');
-        } else if (typeof body.text !== 'string' || !body.text.trim() || body.text.length > 32000) throw fail('Enter a message of up to 32,000 characters.');
-        // Acquire the chat lock before any network await.
-        running.set(chat.id, manual ? 'compacting' : 'replying'); activityRevision++;
-        if (!privateMatch) inFlightChats.set(chat.id, chat);
-        const controller = new AbortController();
-        response.on('close', () => { if (!response.writableEnded) controller.abort(); });
-        const emit = event => { if (!response.destroyed) response.write(`${JSON.stringify(event)}\n`); };
-        const user = manual ? null : { role: 'user', content: body.text.trim() };
-        let metadata;
-        const saveFailedAttempt = error => {
-          if (!metadata) return;
-          try { commitChat(chat, { failedAttempts: [...(chat.failedAttempts ?? []), { ...(manual ? { operation: 'compaction' } : { text: user.content }), error, metadata }] }); }
-          catch (storageError) { return `Failed request diagnostics could not be saved: ${storageError.message}`; }
-        };
-        try {
-          const selected = resolveModel(await models(), chat.model);
-          if (chat.effort !== 'default' && !selected.efforts.includes(chat.effort)) throw fail('Choose a supported effort.');
-          const token = await auth.accessToken();
-          const threshold = manual ? 1000 : autoCompactThreshold(selected);
-          response.writeHead(200, { 'Content-Type': 'application/x-ndjson', 'X-Accel-Buffering': 'no' });
-          response.flushHeaders();
-          if (manual) emit({ type: 'status', message: 'Compacting context… This can take a few minutes.' });
-          const input = manual ? chat.input : [...chat.input, user];
-          const agents = store.agentsForChat(chat.folderId ?? null);
-          const output = await streamReply({
-            fetcher, token, model: chat.model, effort: chat.effort, fast: chat.fast === true,
-            input, instructions: agentsInstructions(agents), compactThreshold: threshold,
-            // Avoid temporary instructions: OpenAI can carry them into the
-            // encrypted checkpoint. Discard this request's generated reply.
-            ...(manual ? { requireMessage: false } : {}),
-            signal: controller.signal, onDelta: text => { if (!manual) emit({ type: 'delta', text }); },
-            onCompaction: () => emit({ type: 'status', message: 'Compacted context received; finishing the request…' }),
-            onServiceTier: tier => {
-              if (chat.fast === true && tier === 'default') emit({ type: 'notice', message: 'Fast mode was requested, but OpenAI used Standard processing for this reply.' });
-            },
-            onMetadata: value => { metadata = { ...value, agents_md: agents.map(({ folderId, revision, updatedAt }) => ({ folderId, revision, updatedAt })) }; },
-          });
-          if (controller.signal.aborted) { saveFailedAttempt(manual ? 'Compaction was cancelled.' : 'Reply was cancelled.'); return; }
-          const checkpoint = output.findLast(item => item.type === 'compaction');
-          const nextInput = compactedInput([...input, ...output]);
-          if (manual && !checkpoint) throw fail('Nothing to compact: OpenAI requires at least 1,000 context tokens, or this model did not return a compaction. History was not changed.');
-          const compactions = checkpoint ? [...(chat.compactions ?? []), {
-            mode: manual ? 'manual' : 'automatic', model: chat.model, threshold,
-            completed_at: metadata.finished_at, response_id: metadata.response?.id,
-            after_message_count: chat.messages.length + (manual ? 0 : 2),
-            previous_input: chat.input, // Archive superseded opaque state as well as visible messages.
-            ...(manual ? { metadata } : {}), // Automatic metadata is already saved with the reply.
-          }] : chat.compactions;
-          const text = responseText(output);
-          commitChat(chat, manual ? {
-            // The maintenance generation and its reasoning are not chat turns.
-            input: [checkpoint], compactions,
-            contextUsage: latestUsage([{ role: 'assistant', metadata }]), contextUsageSource: 'compaction',
-          } : {
-            input: nextInput, // Keep the latest checkpoint and everything after it.
-            compactions, contextUsage: null, contextUsageSource: 'reply',
-            messages: [...chat.messages, {
-              role: 'user', text: user.content, metadata: { sent_at: metadata.started_at, request: metadata.request },
-            }, { role: 'assistant', text, metadata }],
-            title: chat.messages.length === 0 && !chat.titleEdited ? user.content.replace(/\s+/g, ' ').slice(0, 60) : chat.title,
-          });
-          if (checkpoint) emit({ type: 'status', message: `${manual ? 'Context compacted' : 'Context automatically compacted'}. Chat history is preserved.` });
-          finishActivity(chat.id);
-          emit({ type: 'done', chat: chatView(chat) }); response.end();
-        } catch (error) {
-          const diagnosticError = saveFailedAttempt(error.message);
-          if (response.headersSent) { emit({ type: 'error', message: error.message + (diagnosticError ? ` (${diagnosticError})` : '') }); response.end(); }
-          else throw error;
-        } finally { finishActivity(chat.id); }
-        return;
+        if (body.chat) throw fail('Conversation context is owned by the backend. Reload the page.');
+        const record = startCommand(chat, { ...body, kind: match[2] === '/compact' ? 'compaction' : body.kind ?? 'reply' });
+        if (match[2] === '/operations' || request.headers.accept === 'application/json')
+          return json(response, { operation: operationView(record), chat: chatView(chat) }, 202);
+        // Compatibility stream: observing an operation, never owning it.
+        observe(record, chat, response, true); return;
       }
       throw fail('Method not allowed.', 405);
     } catch (error) {
@@ -306,16 +369,23 @@ export async function createHarness({ port = 0, directory = join(root, '.data'),
       else response.end();
     } finally {
       activeRequests--;
-      if (serverClosed && activeRequests === 0) store.close();
+      maybeClose();
     }
   });
-  server.once('close', () => { serverClosed = true; if (activeRequests === 0) store.close(); });
-  try { await new Promise((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(port, '127.0.0.1', resolve);
-  }); } catch (error) { store.close(); throw error; }
+  server.once('close', () => { serverClosed = true; maybeClose(); });
+  try {
+    await new Promise((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(port, '127.0.0.1', resolve);
+    });
+    // A duplicate startup that cannot claim this port must not interrupt the
+    // operations still owned by the existing backend.
+    store.recoverOperations();
+  } catch (error) {
+    storeClosed = true; jobs.dispose(); store.close(); server.close(); throw error;
+  }
   origin = `http://127.0.0.1:${server.address().port}`;
-  return { server, origin };
+  return { server, origin, jobs };
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {

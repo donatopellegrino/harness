@@ -217,3 +217,5 @@ header select { max-width: 230px; }
 #new-private-chat { text-align: left; font-size: 12px; }
 #private-notice { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; justify-content: space-between; padding: 9px 0; color: var(--muted); font-size: 12px; border-bottom: 1px solid var(--divider); }
 #close-private-chat { flex-shrink: 0; font-size: 12px; }
+
+#operation-status, #connection-status, .operation-incomplete { color: var(--muted); font-size: 12px; margin: 8px 0; }

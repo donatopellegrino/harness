@@ -1,3 +1,5 @@
+import { createPrivateChats } from '/private-chats.js';
+import { readableMessageMetadata } from '/readable-metadata.js';
 import { accountSynchronizer } from '/account-sync.js';
 import { reconcileCompaction } from '/compaction-sync.js';
 import { createMessageInfo } from '/message-info.js';
@@ -7,6 +9,7 @@ import { createAgentsEditor } from '/agents-md.js';
 import { createFolders, mergeChat, mergeOrganization, visibleChats } from '/folders.js';
 
 const $ = id => document.getElementById(id);
+const privateChats = createPrivateChats({ metadata: readableMessageMetadata });
 let chats = [], folders = [], models = [], account = {}, activeId, busy = false, compacting = false, savingSettings = false;
 let effortPointer = null;
 let activities = new Map(), activityRevision = -1, activityEpoch = 0, lastBusy = false, lastLocked = false, checkingActivity = false;
@@ -24,12 +27,14 @@ const showError = message => { $('error').textContent = message; $('error').hidd
 const showStatus = message => { $('context-status').textContent = message; $('context-status').hidden = !message; };
 const safely = handler => async (...args) => { try { showError(''); await handler(...args); } catch (error) { showError(error.message); } };
 async function api(path, method = 'GET', body) {
+  if (privateChats.handles(path)) return privateChats.api(path, method, body);
   const response = await fetch(path, { method, headers: method === 'GET' ? {} : { 'Content-Type': 'application/json' }, ...(body ? { body: JSON.stringify(body) } : {}) });
   const data = await response.json();
   if (!response.ok) throw new Error(data.error ?? 'Request failed.');
   return data;
 }
 function replaceChat(chat) {
+  chat = privateChats.accept(chat);
   const index = chats.findIndex(item => item.id === chat.id);
   if (index < 0) chats.unshift(chat); else chats[index] = mergeChat(chats[index], chat);
 }
@@ -54,6 +59,9 @@ const folderSidebar = createFolders({ state: () => ({ folders, chats, activeId, 
   afterRender: controls,
 });
 const agentsEditor = createAgentsEditor({ api });
+function clearPrivateChats() {
+  folderSidebar.clearPrivateEditor(); privateChats.clear();
+}
 $('global-agents').onclick = () => agentsEditor.open();
 const messageInfo = createMessageInfo({ load: (chatId, index) => api(`/api/chats/${chatId}/messages/${index}/metadata`) });
 const messageScroll = createScrollFollow($('messages'));
@@ -71,6 +79,9 @@ function controls() {
   $('send-effort').disabled = $('send').disabled || !$('prompt').value.trim();
   if ($('send-effort').disabled) closeEffortMenu();
   $('new-chat').disabled = locked;
+  $('new-private-chat').disabled = locked;
+  $('private-notice').hidden = !active()?.private;
+  $('close-private-chat').disabled = locked;
   $('new-folder').disabled = locked || archivedView;
   $('archive-view').disabled = locked;
   $('archive-view').setAttribute('aria-pressed', String(archivedView));
@@ -164,7 +175,7 @@ function renderMessages({ preserveScroll = false } = {}) {
       const subtitle = document.createElement('p'); subtitle.textContent = active()
         ? 'This archived chat has no messages. Restore it from its edit dialog to start chatting.' : 'No archived chats. Archive one from its edit dialog.';
       empty.append(title, subtitle); $('messages').append(empty);
-    } else history.forEach((item, index) => { message(item.role, item.text, { chatId: activeId, index }); mark(index + 1); });
+    } else history.forEach((item, index) => { message(item.role, item.text, { chatId: activeId, index, private: active()?.private === true }); mark(index + 1); });
   };
   if (preserveScroll) messageScroll.update(draw); else messageScroll.reset(draw);
 }
@@ -190,7 +201,11 @@ function render() {
   $('speed').setAttribute('aria-pressed', String(active()?.fast === true));
 }
 async function refresh() {
-  const state = await api('/api/state'); chats = state.chats; folders = state.folders ?? []; account = state.auth; applyActivity(state.activity);
+  const state = await api('/api/state');
+  if (account.connected && (!state.auth.connected || state.auth.email !== account.email)) {
+    clearPrivateChats(); messageInfo.close(); showError(''); $('prompt').value = '';
+  }
+  chats = [...state.chats, ...privateChats.list()]; folders = state.folders ?? []; account = state.auth; applyActivity(state.activity);
   $('account-status').textContent = account.connected ? `${account.email ?? 'Connected'}\n${account.sharing ? 'Using ChatGPT plan' : 'Plan usage not enabled'}` : 'Not connected';
   $('login').hidden = account.connected && account.sharing;
   $('login').textContent = account.connected ? 'Enable ChatGPT plan usage' : 'Continue with ChatGPT';
@@ -200,8 +215,9 @@ async function refresh() {
   render();
   if (account.sharing) { models = (await api('/api/models')).models; render(); }
 }
-async function newChat({ preserveDraft = false } = {}) {
-  const chat = await api('/api/chats', 'POST', { folderId: archivedView ? null : folderSidebar.selectedFolder() }); archivedView = false; replaceChat(chat); activeId = chat.id; folderSidebar.selectChat(chat.id, chat.folderId); folderSidebar.revealFolder(chat.folderId);
+async function newChat({ preserveDraft = false, privateMode = false } = {}) {
+  const folderId = archivedView ? null : folderSidebar.selectedFolder();
+  const chat = privateMode ? privateChats.create(folderId) : await api('/api/chats', 'POST', { folderId }); archivedView = false; replaceChat(chat); activeId = chat.id; folderSidebar.selectChat(chat.id, chat.folderId); folderSidebar.revealFolder(chat.folderId);
   if (!preserveDraft) $('prompt').value = '';
   render(); $('prompt').focus();
 }
@@ -221,6 +237,12 @@ async function saveSettings() {
     }
   } finally { savingSettings = false; controls(); }
 }
+$('new-private-chat').onclick = safely(() => newChat({ privateMode: true }));
+$('close-private-chat').onclick = () => {
+  if (busy || savingSettings || !active()?.private) return;
+  const id = activeId; folderSidebar.clearPrivateEditor(); privateChats.close(id); chats = chats.filter(chat => chat.id !== id);
+  activities.delete(id); showError(''); selectFirstChat(); render();
+};
 $('new-chat').onclick = safely(newChat);
 $('archive-view').onclick = safely(() => {
   if (busy || savingSettings) return;
@@ -243,7 +265,9 @@ $('speed').onclick = safely(async () => {
 });
 $('login').onclick = safely(async () => { const { url } = await api('/api/login', 'POST'); window.location.assign(url); });
 $('logout').onclick = safely(async () => {
-  const result = await api('/api/logout', 'POST'); await refresh();
+  const result = await api('/api/logout', 'POST');
+  clearPrivateChats(); chats = chats.filter(chat => !chat.private); messageInfo.close(); showError('');
+  await refresh();
   if (!result.revoked) showError('Signed out locally. Remote revocation was not confirmed; disconnect Basic Harness in ChatGPT settings.');
 });
 
@@ -275,18 +299,19 @@ $('compact').onclick = safely(async () => {
   if (busy || savingSettings || !active()?.messages.length) return;
   compacting = true; busy = true; controls(); showStatus('Compacting context… This can take a few minutes.');
   let done = false, requested = false, previousCount = active().compactionCount ?? 0;
-  const chatId = activeId;
+  const chatId = activeId, privateTurn = active()?.private === true;
   try {
     await saveSettings();
     previousCount = active().compactionCount ?? 0;
     requested = true;
-    const response = await fetch(`/api/chats/${chatId}/compact`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    const response = await privateChats.request(chatId, 'compact');
     await readEvents(response, item => { if (item.type === 'done') { replaceChat(item.chat); done = true; } });
     if (!done) throw new Error('Compaction completion could not be confirmed.');
     renderMessages({ preserveScroll: true });
   } catch (error) {
     showStatus('');
-    if (!requested) throw error;
+    if (privateTurn && !privateChats.has(chatId)) return;
+    if (!requested || privateTurn) throw error;
     let confirmed;
     try {
       confirmed = await reconcileCompaction({ chatId, previousCount,
@@ -387,6 +412,7 @@ $('composer').onsubmit = safely(async event => {
   const text = $('prompt').value.trim(); if (!text || busy || savingSettings || !account.sharing || archivedView || active()?.archived) return;
   busy = true; controls(); showError(''); showStatus('');
   let received = '', done = false;
+  const chatId = activeId, privateTurn = active()?.private === true;
   try {
     await saveSettings();
     $('prompt').value = '';
@@ -396,7 +422,7 @@ $('composer').onsubmit = safely(async event => {
       if (!active().messages.length) $('messages').replaceChildren();
       message('user', text); reply = message('assistant', 'Thinking…');
     });
-    const response = await fetch(`/api/chats/${activeId}/messages`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }) });
+    const response = await privateChats.request(activeId, 'messages', { text });
     await readEvents(response, item => {
       if (item.type === 'delta') { received += item.text; messageScroll.update(() => { reply.textContent = received; }); }
       if (item.type === 'done') { replaceChat(item.chat); done = true; }
@@ -404,6 +430,8 @@ $('composer').onsubmit = safely(async event => {
     if (!done) throw new Error('The reply did not finish. Try again.');
     renderChats(); renderMessages({ preserveScroll: true });
   } catch (error) {
+    // A closed private tab must never restore its draft into another chat.
+    if (privateTurn && !privateChats.has(chatId)) return;
     // Failed turns are not added to saved history; preserve the draft for retry.
     $('prompt').value = text; renderMessages({ preserveScroll: true }); showStatus(''); throw error;
   } finally { busy = false; controls(); $('prompt').focus(); }
@@ -441,3 +469,13 @@ async function checkActivity() {
 setInterval(checkActivity, 1000);
 window.addEventListener('focus', checkActivity);
 document.addEventListener('visibilitychange', checkActivity);
+
+// Also clear the rendered transcript before a page can enter the back/forward cache.
+window.addEventListener('pagehide', () => {
+  const wasPrivate = active()?.private;
+  showError(''); messageInfo.close();
+  clearPrivateChats(); chats = chats.filter(chat => !chat.private);
+  if (wasPrivate) { activeId = undefined; $('prompt').value = ''; render(); }
+  else renderChats();
+});
+window.addEventListener('pageshow', event => { if (event.persisted) void safely(refresh)(); });

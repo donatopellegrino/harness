@@ -84,7 +84,7 @@ textarea { resize: vertical; width: 100%; min-width: 0; max-height: 180px; min-h
 #error { background: var(--error-bg); color: var(--error-text); border-radius: 7px; padding: 12px; font-size: 13px; line-height: 1.5; }
 [hidden] { display: none !important; }
 @media (max-width: 700px) { aside { width: 170px; padding: 18px 10px; } main { padding: 0 14px 10px; } header { gap: 10px; } label { flex-wrap: wrap; } select { max-width: 170px; } .brand { font-size: 14px; } .account { font-size: 11px; } }
-@media (max-width: 700px) { #composer { flex-wrap: wrap; } #composer textarea { flex-basis: 100%; } .effort-send { margin-left: auto; } }
+@media (max-width: 700px) { #composer { flex-wrap: wrap; } #composer textarea { flex-basis: 100%; } #send { margin-left: auto; } }
 
 .sidebar-row { display: flex; align-items: center; min-width: 0; gap: 2px; }
 .sidebar-row .chat-open, .sidebar-row .folder-label { flex: 1; min-width: 0; }
@@ -211,3 +211,7 @@ header select { max-width: 230px; }
   header select { max-width: 155px; }
   .context-actions { align-items: flex-start; flex-wrap: wrap; }
 }
+
+#new-private-chat { text-align: left; font-size: 12px; }
+#private-notice { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; justify-content: space-between; padding: 9px 0; color: var(--muted); font-size: 12px; border-bottom: 1px solid var(--divider); }
+#close-private-chat { flex-shrink: 0; font-size: 12px; }

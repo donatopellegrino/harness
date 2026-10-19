@@ -71,7 +71,7 @@ export function createFolders({ state, api, onOrganization, onFolder, onSelectCh
     $('organize-parent').replaceChildren(...choices.map(choice => new Option(choice.name, choice.id)));
     $('organize-parent').value = (item ? folder ? item.parentId : item.folderId : selected) ?? '';
     $('organize-error').hidden = true; $('organize-save').textContent = item ? 'Save' : 'Create';
-    $('chat-actions').hidden = folder;
+    $('chat-actions').hidden = folder || item?.private === true;
     $('folder-agents').hidden = !folder || !item;
     $('archive-chat').textContent = item?.archived ? 'Restore chat' : 'Archive chat';
     for (const id of ['archive-chat', 'delete-chat']) $(id).disabled = state().locked;
@@ -110,6 +110,16 @@ export function createFolders({ state, api, onOrganization, onFolder, onSelectCh
   $('new-folder').onclick = () => edit('folder');
   $('organize-cancel').onclick = () => $('organize-dialog').close();
   $('organize-dialog').addEventListener('cancel', event => { if (saving) event.preventDefault(); });
+  function clearPrivateEditor() {
+    if (!editing?.item?.private) return;
+    editing = null;
+    $('organize-name').value = '';
+    $('organize-error').textContent = ''; $('organize-error').hidden = true;
+    if ($('organize-dialog').open) $('organize-dialog').close();
+  }
+  $('organize-dialog').addEventListener('close', () => {
+    if (!$('organize-dialog').open) clearPrivateEditor();
+  });
   $('organize-form').onsubmit = async event => {
     event.preventDefault(); if (saving || !editing) return;
     const { kind, item } = editing, name = $('organize-name').value.trim(), parent = item ? null : $('organize-parent').value || null;
@@ -167,14 +177,14 @@ export function createFolders({ state, api, onOrganization, onFolder, onSelectCh
       }
       for (const chat of chats.filter(item => archivedView || (item.folderId ?? null) === parentId)) {
         const row = document.createElement('div'); row.className = 'sidebar-row';
-        const open = button(chat.title, 'chat-open', () => {
+        const open = button(chat.private ? `◌ ${chat.title}` : chat.title, 'chat-open', () => {
           if (selection?.kind === 'chat' && selection.id === chat.id) { edit('chat', chat); return; }
           selected = chat.folderId ?? null; selection = { kind: 'chat', id: chat.id };
           // Selecting an item for editing must also work while the active
           // conversation is locked. Keep that conversation and its draft intact.
           if (onSelectChat(chat.id) === false) { render(); afterRender(); }
         });
-        open.dataset.chatOpen = ''; open.dataset.chatId = chat.id; open.title = `${chat.title} · Click again to edit, ${chat.archived ? 'restore' : 'archive'}, or delete`; open.setAttribute('aria-current', String(selection?.kind === 'chat' && chat.id === selection.id));
+        open.dataset.chatOpen = ''; open.dataset.chatId = chat.id; open.title = chat.private ? 'Temporary chat · Only in this tab · Not saved to the database' : `${chat.title} · Click again to edit, ${chat.archived ? 'restore' : 'archive'}, or delete`; open.setAttribute('aria-current', String(selection?.kind === 'chat' && chat.id === selection.id));
         row.append(open, indicator('chat', chat.id)); container.append(row);
       }
     }
@@ -208,5 +218,5 @@ export function createFolders({ state, api, onOrganization, onFolder, onSelectCh
       if (node.getAttribute('aria-label') !== label) { node.setAttribute('aria-label', label); node.title = label; }
     }
   }
-  return { render, revealFolder, updateActivity, restoreActiveSelection, selectChat: (id, folderId) => { selected = folderId ?? null; selection = { kind: 'chat', id }; }, selectedFolder: () => selected };
+  return { render, revealFolder, updateActivity, restoreActiveSelection, clearPrivateEditor, selectChat: (id, folderId) => { selected = folderId ?? null; selection = { kind: 'chat', id }; }, selectedFolder: () => selected };
 }

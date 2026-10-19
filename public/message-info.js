@@ -30,6 +30,7 @@ export function createMessageInfo({ load }) {
   function close({ restoreFocus = false } = {}) {
     clearTimeout(closeTimer); version++;
     const previous = owner; owner = null; pinned = false; panel.hidden = true;
+    content.replaceChildren(); heading.textContent = 'Message info';
     previous?.setAttribute('aria-expanded', 'false');
     if (restoreFocus && previous?.isConnected) {
       suppressFocus = true; previous.focus({ preventScroll: true }); suppressFocus = false;
@@ -107,8 +108,11 @@ export function createMessageInfo({ load }) {
       if (!record) data = { message: { role: button.dataset.role }, source: 'Message in progress', pending: true, available: false, metadata: {} };
       else {
         const key = `${record.chatId}:${record.index}`;
-        if (!cache.has(key)) cache.set(key, load(record.chatId, record.index).catch(error => { cache.delete(key); throw error; }));
-        data = await cache.get(key);
+        if (record.private) data = await load(record.chatId, record.index);
+        else {
+          if (!cache.has(key)) cache.set(key, load(record.chatId, record.index).catch(error => { cache.delete(key); throw error; }));
+          data = await cache.get(key);
+        }
       }
       if (current !== version || owner !== button || !button.isConnected) return;
       render(data); position();

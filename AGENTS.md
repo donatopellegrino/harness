@@ -11,4 +11,5 @@ Make code changes on a feature branch and submit a pull request. Do not push cha
 - Do not infer additional organization features from requests about unrelated features.
 - Model requests receive only database-backed global AGENTS.md and the chat's immediate container AGENTS.md. Never inherit from ancestors or other containers, and never read repository/host instruction files into chat requests.
 
-- Private chats are temporary and tab-local. Never persist their text, context, metadata, reasoning, compactions, or failed attempts to SQLite or browser storage, or expose them through shared chat/activity/metadata lookups.
+- Private chats are temporary and owned by backend memory. Never persist their text, context, metadata, reasoning, compactions, or failed attempts to SQLite or browser storage, or expose them through shared chat/activity/metadata lookups. Page closure loses its access capability; it does not cancel backend work.
+- Backend operations own execution, per-chat locks, progress, and completion. HTTP streams are observers. Disconnects, navigation, and browser lifetime must never cancel operations or be required to commit results. Saved operations checkpoint to SQLite and are marked interrupted after a backend restart; do not automatically retry model requests.

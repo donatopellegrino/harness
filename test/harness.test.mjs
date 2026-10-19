@@ -353,42 +353,31 @@ test('HTTP chat flow: model/effort, full history, isolation, failed-turn rollbac
   assert.deepEqual(sent.at(-1).input.slice(1, 3), output('Hello 🐱'));
 });
 
-test('client cancellation archives received metadata without committing a partial turn', async t => {
+test('browser disconnection leaves backend work running and commits the completed reply', async t => {
   const store = tempStore(t);
   store.replaceChats([{ id: 'cancel-test', title: 'New chat', model: 'test', effort: 'default', messages: [], input: [] }]);
-  const auth = { status: () => ({ connected: true, sharing: true }), accessToken: async () => 'secret' };
-  const app = await createHarness({ directory: store.directory, auth, fetcher: async (url, options) => {
+  let finish, providerSignal;
+  const app = await createHarness({ directory: store.directory, auth: { status: () => ({ connected: true, sharing: true }), accessToken: async () => 'fixture-token' }, fetcher: async (url, options) => {
     if (url.endsWith('/models')) return Response.json({ models: [{ slug: 'test' }] });
+    providerSignal = options.signal;
     return new Response(new ReadableStream({ start(controller) {
-      const events = [{ type: 'response.created', response: { id: 'resp_cancel', status: 'in_progress', future_field: 'keep' } }, { type: 'response.output_text.delta', delta: 'partial' }];
-      controller.enqueue(new TextEncoder().encode(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join('')));
-      options.signal.addEventListener('abort', () => controller.error(new DOMException('Cancelled', 'AbortError')), { once: true });
-    } }), { headers: { 'x-request-id': 'req_cancel' } });
+      controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ type: 'response.output_text.delta', delta: 'partial' })}\n\n`));
+      finish = () => { controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ type: 'response.completed', response: { id: 'resp_detached', status: 'completed', output: output('Completed reply') } })}\n\n`)); controller.close(); };
+    } }), { headers: { 'x-request-id': 'req_detached' } });
   } });
   t.after(() => { app.server.close(); app.server.closeAllConnections(); });
-  const cookie = (await fetch(app.origin)).headers.get('set-cookie').split(';')[0];
-  const abort = new AbortController();
-  const response = await fetch(`${app.origin}/api/chats/cancel-test/messages`, {
-    method: 'POST', signal: abort.signal,
-    headers: { Cookie: cookie, Origin: app.origin, 'Content-Type': 'application/json' }, body: JSON.stringify({ text: 'Cancel this' }),
-  });
-  await response.body.getReader().read();
-  abort.abort();
-  // Wait only for this local server's close/abort handler to persist the record.
-  let saved;
-  for (let i = 0; i < 100; i++) {
-    saved = store.listChats()[0];
-    if (saved.failedAttempts?.length) break;
-    await new Promise(resolve => setTimeout(resolve, 10));
-  }
-  assert.deepEqual(saved.messages, []);
-  assert.deepEqual(saved.input, []);
-  const metadata = saved.failedAttempts[0].metadata;
-  assert.equal(metadata.response.id, 'resp_cancel');
-  assert.equal(metadata.response.future_field, 'keep');
-  assert.equal(metadata.http.headers['x-request-id'], 'req_cancel');
-  assert.equal(metadata.error.name, 'AbortError');
-  assert.equal(metadata.events.at(-1).delta, 'partial');
+  const cookie = (await fetch(app.origin)).headers.get('set-cookie').split(';')[0], abort = new AbortController();
+  const response = await fetch(`${app.origin}/api/chats/cancel-test/messages`, { method: 'POST', signal: abort.signal,
+    headers: { Cookie: cookie, Origin: app.origin, 'Content-Type': 'application/json' }, body: JSON.stringify({ text: 'Continue independently' }) });
+  await response.body.getReader().read(); abort.abort();
+  assert.equal(providerSignal.aborted, false);
+  assert.equal(store.latestOperation('cancel-test').partial_text, 'partial');
+  finish(); await app.jobs.idle();
+  const saved = store.getChat('cancel-test');
+  assert.equal(saved.messages[1].text, 'Completed reply'); assert.equal(saved.failedAttempts, undefined);
+  assert.equal(saved.messages[1].metadata.http.headers['x-request-id'], 'req_detached');
+  assert.equal(saved.messages[1].metadata.events[0].delta, 'partial');
+  assert.equal(store.latestOperation('cancel-test').status, 'completed');
 });
 
 test('existing chats without a speed setting use Standard mode', async t => {
@@ -459,8 +448,8 @@ test('JSON requests preserve Unicode split across arbitrary byte chunks and enfo
 });
 
 test('a failed disk commit does not publish a turn or contaminate retries', async t => {
-  const write = Store.prototype.updateChat;
-  t.after(() => { Store.prototype.updateChat = write; });
+  const write = Store.prototype.finishOperation;
+  t.after(() => { Store.prototype.finishOperation = write; });
   for (const failures of [1, 2]) {
     const store = tempStore(t), sent = [];
     store.replaceChats([{ id: 'disk-test', title: 'New chat', model: 'test', effort: 'default', messages: [], input: [] }]);
@@ -477,13 +466,13 @@ test('a failed disk commit does not publish a turn or contaminate retries', asyn
     const call = (path, method = 'GET', body) => fetch(app.origin + path, { method,
       headers: { Cookie: cookie, Origin: app.origin, 'Content-Type': 'application/json' }, ...(body ? { body: JSON.stringify(body) } : {}) });
     let remaining = failures;
-    Store.prototype.updateChat = function(id, changes) {
+    Store.prototype.finishOperation = function(id, changes, error) {
       if (this.directory === store.directory && remaining > 0) {
         const message = remaining === failures ? 'turn-write-failed' : 'diagnostic-write-failed';
         remaining--;
         throw Object.assign(new Error(message), { code: 'EIO' });
       }
-      return write.call(this, id, changes);
+      return write.call(this, id, changes, error);
     };
     const events = (await (await call('/api/chats/disk-test/messages', 'POST', { text: 'First try' })).text()).trim().split('\n').map(JSON.parse);
     assert.equal(events.at(-1).type, 'error');
@@ -497,6 +486,6 @@ test('a failed disk commit does not publish a turn or contaminate retries', asyn
     await (await call('/api/chats/disk-test/messages', 'POST', { text: 'Retry' })).text();
     assert.deepEqual(sent[1].input, [{ role: 'user', content: 'Retry' }]);
     assert.equal(store.listChats()[0].messages.length, 2);
-    Store.prototype.updateChat = write;
+    Store.prototype.finishOperation = write;
   }
 });

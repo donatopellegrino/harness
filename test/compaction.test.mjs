@@ -169,12 +169,12 @@ test('manual compaction locks chat edits, duplicate requests and sign-out until 
 
 test('compaction disk failure keeps the old checkpoint in memory and on disk', async t => {
   const f = await fixture(t, () => sse([complete([checkpoint('new')])]));
-  const write = Store.prototype.updateChat;
-  t.after(() => { Store.prototype.updateChat = write; });
+  const write = Store.prototype.finishOperation;
+  t.after(() => { Store.prototype.finishOperation = write; });
   let fail = true;
-  Store.prototype.updateChat = function(id, changes) {
+  Store.prototype.finishOperation = function(id, changes, error) {
     if (this.directory === f.store.directory && fail) { fail = false; throw new Error('Disk full'); }
-    return write.call(this, id, changes);
+    return write.call(this, id, changes, error);
   };
   const result = await events(await f.call('/api/chats/chat/compact', 'POST', {}));
   assert.equal(result.at(-1).type, 'error');
@@ -206,26 +206,18 @@ test('model changes use the selected catalog maximum and custom models have no i
   assert.equal(f.sent[1].context_management, undefined);
 });
 
-test('closing a manual compaction stream cancels inference and preserves the old active context', { timeout: 3000 }, async t => {
-  let notifyAbort;
-  const aborted = new Promise(resolve => { notifyAbort = resolve; });
-  const f = await fixture(t, (_request, options) => new Promise((_resolve, reject) => {
-    options.signal.addEventListener('abort', () => {
-      reject(new DOMException('Cancelled', 'AbortError')); notifyAbort();
-    }, { once: true });
-  }));
-  const response = await f.call('/api/chats/chat/compact', 'POST', {});
-  const reader = response.body.getReader();
-  const first = await reader.read();
-  assert.match(new TextDecoder().decode(first.value), /Compacting context/);
-  await reader.cancel(); await aborted;
-  const state = await (await f.call('/api/state')).json();
-  assert.equal(state.chats[0].compactionCount, 0);
-  const saved = f.store.listChats()[0];
-  assert.deepEqual(saved.input, seed().input);
+test('closing a compaction observer leaves backend compaction running and commits its checkpoint', { timeout: 3000 }, async t => {
+  let release, providerSignal;
+  const held = new Promise(resolve => { release = resolve; });
+  const f = await fixture(t, async (_request, options) => { providerSignal = options.signal; await held; return sse([complete([checkpoint('detached-checkpoint')])]); });
+  const response = await f.call('/api/chats/chat/compact', 'POST', {}), reader = response.body.getReader();
+  assert.match(new TextDecoder().decode((await reader.read()).value), /Compacting context/);
+  await reader.cancel(); assert.equal(providerSignal.aborted, false);
+  release(); await f.app.jobs.idle();
+  const saved = f.store.getChat('chat');
+  assert.deepEqual(saved.input, [checkpoint('detached-checkpoint')]);
   assert.deepEqual(saved.messages, seed().messages);
-  assert.equal(saved.failedAttempts[0].operation, 'compaction');
-  assert.equal(saved.failedAttempts[0].metadata.error.name, 'AbortError');
+  assert.equal(saved.compactions.length, 1); assert.equal(saved.failedAttempts, undefined);
 });
 
 test('a lost manual completion acknowledgment is reconciled from durable state', async t => {

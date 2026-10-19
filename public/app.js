@@ -1,8 +1,7 @@
+import { observeOperation, operationActive, commandId } from '/operations.js';
 import { createChatNavigation, chatIdFromPath } from '/chat-navigation.js';
 import { createPrivateChats } from '/private-chats.js';
-import { readableMessageMetadata } from '/readable-metadata.js';
 import { accountSynchronizer } from '/account-sync.js';
-import { reconcileCompaction } from '/compaction-sync.js';
 import { createMessageInfo } from '/message-info.js';
 import { resizeComposer } from '/composer.js';
 import { createScrollFollow } from '/scroll-follow.js';
@@ -10,15 +9,19 @@ import { createAgentsEditor } from '/agents-md.js';
 import { createFolders, mergeChat, mergeOrganization, visibleChats } from '/folders.js';
 
 const $ = id => document.getElementById(id);
-const privateChats = createPrivateChats({ metadata: readableMessageMetadata });
+const privateChats = createPrivateChats();
 let chats = [], folders = [], models = [], account = {}, activeId, busy = false, compacting = false, savingSettings = false;
-let effortPointer = null;
-let activities = new Map(), activityRevision = -1, activityEpoch = 0, lastBusy = false, lastLocked = false, checkingActivity = false;
+let effortPointer = null, submitting = false, observation = null, pageHidden = false;
+let activities = new Map(), activityRevision = -1, activityInstance, activityEpoch = 0, lastBusy = false, lastLocked = false, checkingActivity = false;
 function applyActivity(snapshot) {
-  if (!snapshot || snapshot.revision < activityRevision) return;
+  if (!snapshot) return;
+  if (snapshot.instance !== activityInstance) { activityInstance = snapshot.instance; activityRevision = -1; }
+  if (snapshot.revision < activityRevision) return;
   activityRevision = snapshot.revision;
   activities = new Map(snapshot.chats.filter(chat => chat.activity).map(chat => [chat.id, chat.activity]));
   folderSidebar.updateActivity();
+  const current = active(), remote = snapshot.chats.find(chat => chat.id === activeId);
+  if (remote?.operationId && (remote.operationId !== current?.operation?.id || remote.operationStatus !== current?.operation?.status)) void loadChat(activeId);
 }
 const displayedActivities = () => { const result = new Map(activities); if (busy && activeId) result.set(activeId, compacting ? 'compacting' : 'replying'); return result; };
 const active = () => chats.find(chat => chat.id === activeId);
@@ -27,17 +30,12 @@ const modelID = () => $('model').value === CUSTOM_MODEL ? $('model-id').value.tr
 const showError = message => { $('error').textContent = message; $('error').hidden = !message; };
 const showStatus = message => { $('context-status').textContent = message; $('context-status').hidden = !message; };
 const safely = handler => async (...args) => { try { showError(''); await handler(...args); } catch (error) { showError(error.message); } };
-async function api(path, method = 'GET', body) {
-  if (privateChats.handles(path)) return privateChats.api(path, method, body);
-  const response = await fetch(path, { method, headers: method === 'GET' ? {} : { 'Content-Type': 'application/json' }, ...(body ? { body: JSON.stringify(body) } : {}) });
-  const data = await response.json();
-  if (!response.ok) throw new Error(data.error ?? 'Request failed.');
-  return data;
-}
+async function api(path, method = 'GET', body) { return privateChats.api(path, method, body); }
+
 function replaceChat(chat) {
-  chat = privateChats.accept(chat);
   const index = chats.findIndex(item => item.id === chat.id);
-  if (index < 0) chats.unshift(chat); else chats[index] = mergeChat(chats[index], chat);
+  chat = privateChats.accept(mergeChat(chats[index], chat));
+  if (index < 0) chats.unshift(chat); else chats[index] = chat;
 }
 let archivedView = false, initialNavigation = true;
 function selectFirstChat({ replace = true } = {}) {
@@ -48,10 +46,10 @@ function selectFirstChat({ replace = true } = {}) {
   $('prompt').value = '';
   navigation.write(chat, { replace });
 }
-const folderSidebar = createFolders({ state: () => ({ folders, chats, activeId, archivedView, locked: busy || savingSettings, activities: displayedActivities() }), api,
+const folderSidebar = createFolders({ state: () => ({ folders, chats, activeId, archivedView, locked: submitting || savingSettings, activities: displayedActivities() }), api,
   onOrganization: update => { const index = chats.findIndex(chat => chat.id === update.id); if (index >= 0) chats[index] = mergeOrganization(chats[index], update); },
   onFolder: folder => { const index = folders.findIndex(item => item.id === folder.id); if (index < 0) folders.push(folder); else folders[index] = folder; },
-  onSelectChat: id => { if (id === activeId) { renderChats(); controls(); return true; } if (busy || savingSettings) return false; activeId = id; $('prompt').value = ''; showError(''); navigation.write(active()); render(); return true; },
+  onSelectChat: id => { if (id === activeId) { renderChats(); controls(); return true; } if (submitting || savingSettings) return false; activeId = id; $('prompt').value = ''; showError(''); navigation.write(active()); render(); void loadChat(id); return true; },
   onLifecycle: ({ id, removed }) => {
     if (removed) { chats = chats.filter(chat => chat.id !== id); activities.delete(id); }
     if (!visibleChats(chats, archivedView).some(chat => chat.id === activeId)) selectFirstChat();
@@ -69,7 +67,7 @@ const messageInfo = createMessageInfo({ load: (chatId, index) => api(`/api/chats
 const messageScroll = createScrollFollow($('messages'));
 $('messages').addEventListener('scroll', () => messageInfo.close());
 const navigation = createChatNavigation({ location: window.location, history: window.history,
-  findChat: id => chats.find(chat => chat.id === id), isLocked: () => busy || savingSettings,
+  findChat: id => chats.find(chat => chat.id === id), isLocked: () => submitting || savingSettings,
   onSelect: chat => {
     showError('');
     if (!chat) { archivedView = false; selectFirstChat(); }
@@ -78,7 +76,7 @@ const navigation = createChatNavigation({ location: window.location, history: wi
       folderSidebar.selectChat(chat.id, chat.folderId); folderSidebar.revealFolder(chat.folderId);
       $('prompt').value = '';
     }
-    render();
+    render(); if (chat) void loadChat(chat.id);
   },
   onMissing: () => {
     activeId = undefined; archivedView = false; folderSidebar.selectChat(undefined);
@@ -86,44 +84,49 @@ const navigation = createChatNavigation({ location: window.location, history: wi
   },
 });
 window.addEventListener('popstate', () => {
-  const locked = busy || savingSettings;
+  const locked = submitting || savingSettings;
   navigation.openLocation();
   if (locked) showStatus('The linked chat will open when the current request finishes.');
 });
 function controls() {
+  busy = submitting || operationActive(active()?.operation); compacting = active()?.operation?.kind === 'compaction' && operationActive(active()?.operation);
   if (navigation.flush()) return;
   if (lastBusy !== busy) { activityEpoch++; if (!busy && activeId) activities.delete(activeId); lastBusy = busy; }
   resizeComposer($('prompt'));
   folderSidebar.updateActivity();
   const connected = account.sharing && models.length > 0;
-  const locked = busy || savingSettings;
+  const locked = submitting || savingSettings;
   const readOnly = active()?.archived === true || archivedView && !active();
   if (lastLocked && !locked) folderSidebar.restoreActiveSelection();
   lastLocked = locked;
-  $('send').disabled = locked || readOnly || !connected || !modelID();
+  $('send').disabled = locked || operationActive(active()?.operation) || readOnly || !connected || !modelID();
   $('send-effort').disabled = $('send').disabled || !$('prompt').value.trim();
   if ($('send-effort').disabled) closeEffortMenu();
   $('new-chat').disabled = locked;
   $('new-private-chat').disabled = locked;
   $('private-notice').hidden = !active()?.private;
-  $('close-private-chat').disabled = locked;
+  $('close-private-chat').disabled = submitting || savingSettings;
   $('new-folder').disabled = locked || archivedView;
   $('archive-view').disabled = locked;
   $('archive-view').setAttribute('aria-pressed', String(archivedView));
   const archivedCount = visibleChats(chats, true).length;
   $('archive-view').textContent = archivedView ? '← Back to chats' : `Archived chats${archivedCount ? ` (${archivedCount})` : ''}`;
   $('archive-notice').hidden = !active()?.archived;
-  $('model').disabled = locked || readOnly || !connected;
-  $('model-id').disabled = locked || readOnly || !connected;
-  $('effort').disabled = locked || readOnly || !connected;
-  $('speed').disabled = locked || readOnly || !connected;
+  $('model').disabled = locked || operationActive(active()?.operation) || readOnly || !connected;
+  $('model-id').disabled = locked || operationActive(active()?.operation) || readOnly || !connected;
+  $('effort').disabled = locked || operationActive(active()?.operation) || readOnly || !connected;
+  $('speed').disabled = locked || operationActive(active()?.operation) || readOnly || !connected;
   $('login').disabled = locked;
-  $('logout').disabled = locked;
+  $('logout').disabled = locked || displayedActivities().size > 0;
   $('prompt').disabled = locked || readOnly;
   $('send').textContent = busy && !compacting ? 'Replying…' : 'Send';
-  $('compact').disabled = locked || readOnly || !connected || !modelID() || !active()?.messages.length;
+  $('compact').disabled = locked || operationActive(active()?.operation) || readOnly || !connected || !modelID() || !active()?.messages.length;
   $('compact').textContent = compacting ? 'Compacting…' : 'Compact context';
-  renderContext();
+  const operation = active()?.operation;
+  const status = operation?.error || (operationActive(operation) ? operation.message || (operation.kind === 'compaction' ? 'Compacting context…' : 'Replying…') : operation?.kind === 'compaction' && operation.status === 'completed' ? 'Context compacted.' : '');
+  $('operation-status').textContent = status; $('operation-status').hidden = !status;
+  if (operation?.notice) showStatus(operation.notice);
+  renderContext(); watchActiveOperation();
 }
 function renderContext() {
   const selected = models.find(model => model.id === modelID());
@@ -201,6 +204,16 @@ function renderMessages({ preserveScroll = false } = {}) {
         ? 'This archived chat has no messages. Restore it from its edit dialog to start chatting.' : 'No archived chats. Archive one from its edit dialog.';
       empty.append(title, subtitle); $('messages').append(empty);
     } else history.forEach((item, index) => { message(item.role, item.text, { chatId: activeId, index, private: active()?.private === true }); mark(index + 1); });
+    const operation = active()?.operation;
+    if (operation && operation.status !== 'completed' && operation.kind === 'reply') {
+      if (operation.prompt) message('user', operation.prompt);
+      if (operation.text || operationActive(operation)) message('assistant', operation.text || 'Thinking…');
+      if (!operationActive(operation)) {
+        const note = document.createElement('p'); note.className = 'operation-incomplete';
+        note.textContent = operation.text ? 'Unfinished reply · Partial text preserved by the backend.' : 'This reply did not complete.';
+        $('messages').append(note);
+      }
+    }
   };
   if (preserveScroll) messageScroll.update(draw); else messageScroll.reset(draw);
 }
@@ -230,7 +243,7 @@ async function refresh() {
   if (account.connected && (!state.auth.connected || state.auth.email !== account.email)) {
     clearPrivateChats(); messageInfo.close(); showError(''); $('prompt').value = '';
   }
-  chats = [...state.chats, ...privateChats.list()]; folders = state.folders ?? []; account = state.auth; applyActivity(state.activity);
+  chats = [...state.chats, ...await privateChats.refresh()].map(chat => mergeChat(chats.find(current => current.id === chat.id), chat)); folders = state.folders ?? []; account = state.auth; applyActivity(state.activity);
   $('account-status').textContent = account.connected ? `${account.email ?? 'Connected'}\n${account.sharing ? 'Using ChatGPT plan' : 'Plan usage not enabled'}` : 'Not connected';
   $('login').hidden = account.connected && account.sharing;
   $('login').textContent = account.connected ? 'Enable ChatGPT plan usage' : 'Continue with ChatGPT';
@@ -246,7 +259,7 @@ async function refresh() {
 }
 async function newChat({ preserveDraft = false, privateMode = false } = {}) {
   const folderId = archivedView ? null : folderSidebar.selectedFolder();
-  const chat = privateMode ? privateChats.create(folderId) : await api('/api/chats', 'POST', { folderId }); archivedView = false; replaceChat(chat); activeId = chat.id; folderSidebar.selectChat(chat.id, chat.folderId); folderSidebar.revealFolder(chat.folderId);
+  const chat = privateMode ? await privateChats.create(folderId) : await api('/api/chats', 'POST', { folderId }); archivedView = false; replaceChat(chat); activeId = chat.id; folderSidebar.selectChat(chat.id, chat.folderId); folderSidebar.revealFolder(chat.folderId);
   navigation.write(chat);
   if (!preserveDraft) $('prompt').value = '';
   render(); $('prompt').focus();
@@ -268,14 +281,17 @@ async function saveSettings() {
   } finally { savingSettings = false; controls(); }
 }
 $('new-private-chat').onclick = safely(() => newChat({ privateMode: true }));
-$('close-private-chat').onclick = () => {
-  if (busy || savingSettings || !active()?.private) return;
-  const id = activeId; folderSidebar.clearPrivateEditor(); privateChats.close(id); chats = chats.filter(chat => chat.id !== id);
-  activities.delete(id); showError(''); selectFirstChat(); render();
-};
+$('close-private-chat').onclick = safely(async () => {
+  if (submitting || savingSettings || !active()?.private) return;
+  const id = activeId; folderSidebar.clearPrivateEditor();
+  try { await privateChats.close(id); }
+  finally {
+    chats = chats.filter(chat => chat.id !== id); activities.delete(id); selectFirstChat(); render();
+  }
+});
 $('new-chat').onclick = safely(newChat);
 $('archive-view').onclick = safely(() => {
-  if (busy || savingSettings) return;
+  if (submitting || savingSettings) return;
   archivedView = !archivedView; selectFirstChat({ replace: false }); render();
 });
 $('model').onchange = safely(async () => {
@@ -301,61 +317,68 @@ $('logout').onclick = safely(async () => {
   if (!result.revoked) showError('Signed out locally. Remote revocation was not confirmed; disconnect Basic Harness in ChatGPT settings.');
 });
 
-async function readEvents(response, onEvent) {
-  if (!response.ok) throw new Error((await response.json()).error ?? 'Request failed.');
-  const reader = response.body.getReader(), decoder = new TextDecoder(); let buffer = '';
+async function loadChat(id) {
   try {
-    while (true) {
-      const chunk = await reader.read();
-      buffer += chunk.done ? decoder.decode() : decoder.decode(chunk.value, { stream: true });
-      if (chunk.done && buffer.trim()) buffer += '\n';
-      let newline;
-      while ((newline = buffer.indexOf('\n')) >= 0) {
-        const line = buffer.slice(0, newline); buffer = buffer.slice(newline + 1);
-        if (!line.trim()) continue;
-        const item = JSON.parse(line);
-        if (item.type === 'error') throw new Error(item.message);
-        if (item.type === 'notice') showError(item.message);
-        if (item.type === 'status') showStatus(item.message);
-        onEvent(item);
-      }
-      if (chunk.done) break;
-    }
-  } catch (error) { await reader.cancel().catch(() => {}); throw error; }
-  finally { reader.releaseLock(); }
+    const chat = await api(`/api/chats/${id}`);
+    if (chat.private && !privateChats.has(id)) return;
+    replaceChat(chat);
+    if (activeId === id) { renderMessages({ preserveScroll: true }); controls(); }
+  } catch (error) { if (activeId === id) showError(error.message); }
 }
-
-$('compact').onclick = safely(async () => {
-  if (busy || savingSettings || !active()?.messages.length) return;
-  compacting = true; busy = true; controls(); showStatus('Compacting context… This can take a few minutes.');
-  let done = false, requested = false, previousCount = active().compactionCount ?? 0;
-  const chatId = activeId, privateTurn = active()?.private === true;
+function watchActiveOperation() {
+  const chat = active(), operation = chat?.operation;
+  const key = !pageHidden && operationActive(operation) ? operation.id : null;
+  if (observation?.key === key) return;
+  observation?.controller.abort(); observation = null;
+  $('connection-status').hidden = true;
+  if (!key) return;
+  const controller = new AbortController(); observation = { key, controller };
+  void observeOperation({ fetcher: privateChats.fetch, path: `/api/chats/${chat.id}/operations/${key}/events`, signal: controller.signal,
+    onSnapshot: event => {
+      if (chat.private && !privateChats.has(chat.id)) return;
+      const current = chats.find(item => item.id === chat.id); if (!current) return;
+      replaceChat(event.chat ?? { ...current, operation: event.operation });
+      if (activeId === chat.id) { renderMessages({ preserveScroll: true }); controls(); }
+    },
+    onConnection: message => {
+      if (activeId !== chat.id || controller.signal.aborted) return;
+      $('connection-status').textContent = message; $('connection-status').hidden = !message;
+    },
+    onUnavailable: () => { if (!controller.signal.aborted) void safely(refresh)(); },
+  });
+}
+async function startOperation(kind, text) {
+  if (submitting || savingSettings || operationActive(active()?.operation) || active()?.archived) return;
+  const chat = active(), requestId = commandId();
+  const command = { requestId, kind, ...(text === undefined ? {} : { text }), model: modelID(), effort: $('effort').value,
+    fast: $('speed').getAttribute('aria-pressed') === 'true' };
+  submitting = true; controls();
+  const apply = result => {
+    replaceChat(result.chat);
+    activeId = result.chat.id; archivedView = false;
+    folderSidebar.selectChat(activeId, result.chat.folderId); folderSidebar.revealFolder(result.chat.folderId);
+    navigation.write(result.chat);
+    if (kind === 'reply') $('prompt').value = '';
+    render();
+  };
   try {
-    await saveSettings();
-    previousCount = active().compactionCount ?? 0;
-    requested = true;
-    const response = await privateChats.request(chatId, 'compact');
-    await readEvents(response, item => { if (item.type === 'done') { replaceChat(item.chat); done = true; } });
-    if (!done) throw new Error('Compaction completion could not be confirmed.');
-    renderMessages({ preserveScroll: true });
+    const result = chat?.private ? await api(`/api/chats/${chat.id}/operations`, 'POST', command)
+      : await api('/api/operations', 'POST', { ...command, ...(chat ? { chatId: chat.id } : { folderId: folderSidebar.selectedFolder() }) });
+    apply(result);
   } catch (error) {
-    showStatus('');
-    if (privateTurn && !privateChats.has(chatId)) return;
-    if (!requested || privateTurn) throw error;
-    let confirmed;
+    // A missing HTTP acknowledgment is not a reason to submit the command a
+    // second time. Ask the backend whether this request was already accepted.
+    let recovered;
     try {
-      confirmed = await reconcileCompaction({ chatId, previousCount,
-        readState: () => api('/api/state'),
-        onChat: chat => { replaceChat(chat); renderMessages({ preserveScroll: true }); },
-      });
-    } catch {
-      throw new Error(`${error.message} Reload the page to check saved state before retrying compaction.`);
-    }
-    if (!confirmed) throw error;
-    showStatus('Context compacted. Saved state was refreshed after the interrupted request.');
-  }
-  finally { compacting = false; busy = false; controls(); }
-});
+      if (chat?.private) {
+        const current = await api(`/api/chats/${chat.id}`);
+        if (current.operation?.requestId === requestId) recovered = { chat: current };
+      } else recovered = await api(`/api/operations/requests/${requestId}`);
+    } catch { /* The original error is reported; the draft remains available. */ }
+    if (recovered) apply(recovered); else throw error;
+  } finally { submitting = false; controls(); }
+}
+$('compact').onclick = safely(() => startOperation('compaction'));
 
 function closeEffortMenu() {
   const pointer = effortPointer; effortPointer = null;
@@ -439,32 +462,10 @@ document.addEventListener('visibilitychange', () => { if (document.hidden) close
 $('prompt').addEventListener('input', controls);
 $('composer').onsubmit = safely(async event => {
   event.preventDefault();
-  const text = $('prompt').value.trim(); if (!text || busy || savingSettings || !account.sharing || archivedView || active()?.archived) return;
-  busy = true; controls(); showError(''); showStatus('');
-  let received = '', done = false;
-  const chatId = activeId, privateTurn = active()?.private === true;
-  try {
-    await saveSettings();
-    $('prompt').value = '';
-    resizeComposer($('prompt'));
-    let reply;
-    messageScroll.reset(() => {
-      if (!active().messages.length) $('messages').replaceChildren();
-      message('user', text); reply = message('assistant', 'Thinking…');
-    });
-    const response = await privateChats.request(activeId, 'messages', { text });
-    await readEvents(response, item => {
-      if (item.type === 'delta') { received += item.text; messageScroll.update(() => { reply.textContent = received; }); }
-      if (item.type === 'done') { replaceChat(item.chat); done = true; }
-    });
-    if (!done) throw new Error('The reply did not finish. Try again.');
-    renderChats(); renderMessages({ preserveScroll: true });
-  } catch (error) {
-    // A closed private tab must never restore its draft into another chat.
-    if (privateTurn && !privateChats.has(chatId)) return;
-    // Failed turns are not added to saved history; preserve the draft for retry.
-    $('prompt').value = text; renderMessages({ preserveScroll: true }); showStatus(''); throw error;
-  } finally { busy = false; controls(); $('prompt').focus(); }
+  const text = $('prompt').value.trim();
+  if (!text || submitting || savingSettings || !account.sharing || archivedView || active()?.archived) return;
+  await startOperation('reply', text);
+  $('prompt').focus();
 });
 $('prompt').addEventListener('keydown', event => {
   if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); if (!$('send').disabled) $('composer').requestSubmit(); }
@@ -481,7 +482,7 @@ const syncAccount = accountSynchronizer({
   readStatus: () => api('/api/account'),
   currentStatus: () => account,
   onChange: refresh,
-  canSync: () => !busy && !savingSettings && !document.hidden,
+  canSync: () => !submitting && !savingSettings && !document.hidden,
   needsRefresh: () => account.sharing && models.length === 0,
 });
 // Background checks are read-only. Transient network errors leave the current UI
@@ -505,10 +506,11 @@ document.addEventListener('visibilitychange', checkActivity);
 
 // Also clear the rendered transcript before a page can enter the back/forward cache.
 window.addEventListener('pagehide', () => {
+  pageHidden = true; observation?.controller.abort(); observation = null;
   const wasPrivate = active()?.private;
   showError(''); messageInfo.close();
   clearPrivateChats(); chats = chats.filter(chat => !chat.private);
   if (wasPrivate) { activeId = undefined; $('prompt').value = ''; render(); }
   else renderChats();
 });
-window.addEventListener('pageshow', event => { if (event.persisted) void safely(refresh)(); });
+window.addEventListener('pageshow', event => { pageHidden = false; if (event.persisted) void safely(refresh)(); });

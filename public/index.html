@@ -72,7 +72,7 @@
     </header>
     <p id="archive-notice" hidden>Archived chat · Click the selected chat again to restore it or delete it.</p>
     <p id="error" role="alert" hidden></p>
-    <div id="private-notice" role="note" hidden><span>Private · Only in this tab. Closing or reloading discards this chat. Not saved by this harness; messages still go to OpenAI.</span><button id="close-private-chat" type="button">Close private chat</button></div>
+    <div id="private-notice" role="note" hidden><span>Private · Kept only in backend memory. Closing this page does not stop active work. Inactive private chats expire after 5 minutes. Messages still go to OpenAI.</span><button id="close-private-chat" type="button">Close private chat</button></div>
     <section id="messages" aria-label="Conversation" aria-live="polite"></section>
     <form id="composer">
       <textarea id="prompt" rows="1" maxlength="32000" placeholder="Message…" aria-label="Message"></textarea>
@@ -86,6 +86,8 @@
       <button id="compact" type="button" title="Compact the model context while keeping your visible chat history" disabled>Compact context</button>
       <span id="context-policy"></span>
     </div>
+    <p id="operation-status" role="status" aria-live="polite" hidden></p>
+    <p id="connection-status" role="status" hidden></p>
     <p id="context-status" role="status" aria-live="polite" hidden></p>
     <details id="context">
       <summary><span id="context-label">Context: limit unavailable</span></summary>

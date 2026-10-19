@@ -31,7 +31,9 @@ export function mergeChat(current, incoming) {
     ? { ...incoming, ...current } : incoming;
   const currentVersion = current.organizationVersion ?? 0, incomingVersion = incoming.organizationVersion ?? 0;
   const organization = currentVersion === incomingVersion ? conversation : currentVersion > incomingVersion ? current : incoming;
-  return { ...conversation, title: organization.title, folderId: organization.folderId, archived: organization.archived === true, organizationVersion: organization.organizationVersion };
+  const previous = current.operation, next = incoming.operation;
+  const operation = !next || previous && ((previous.order ?? 0) > (next.order ?? 0) || previous.id === next.id && previous.revision > next.revision) ? previous : next;
+  return { ...conversation, operation, title: organization.title, folderId: organization.folderId, archived: organization.archived === true, organizationVersion: organization.organizationVersion };
 }
 
 export function mergeOrganization(current, incoming) {
@@ -75,11 +77,11 @@ export function createFolders({ state, api, onOrganization, onFolder, onSelectCh
     $('chat-actions').hidden = folder || item?.private === true;
     $('folder-agents').hidden = !folder || !item;
     $('archive-chat').textContent = item?.archived ? 'Restore chat' : 'Archive chat';
-    for (const id of ['archive-chat', 'delete-chat']) $(id).disabled = state().locked;
+    for (const id of ['archive-chat', 'delete-chat']) $(id).disabled = state().locked || state().activities?.has(item?.id);
     $('organize-dialog').showModal(); $('organize-name').focus(); $('organize-name').select();
   }
   async function lifecycle(remove) {
-    if (saving || state().locked || editing?.kind !== 'chat') return;
+    if (saving || state().locked || editing?.kind !== 'chat' || state().activities?.has(editing?.item?.id)) return;
     const { item } = editing;
     if (remove) {
       const dialog = $('delete-confirm-dialog');

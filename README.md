@@ -8,6 +8,14 @@ Click an already selected chat again to open its edit dialog. **Archive chat** h
 
 **Delete permanently…** asks “Are you sure?” before removing the chat. Deletion runs in a SQLite transaction and cascades to all its message, input/context, compaction, failed-attempt, and shared-payload rows; it is not a soft delete and has no undo. Other chats, folders, and account state are preserved. Chats that are currently working cannot be archived, restored, or deleted. Historical database backups are independent files and are not modified by chat deletion; this feature does not claim forensic erasure of disk pages or backup copies.
 
+## Chat URLs
+
+Saved chats have stable URLs at `/chats/<id>`. Selecting or creating a chat updates the address; opening the URL directly or refreshing selects that conversation and reveals its folder. Sidebar chat names are links, so copying a link and opening it in another tab work normally. Clicking the selected chat again still opens its rename dialog. Renaming does not change the URL.
+
+Browser Back/Forward selects the corresponding conversation. During a reply, compaction, or settings save, navigation waits until that request finishes. Archived links open the archive view with the chat read-only. Missing/deleted chat links show an unavailable message instead of selecting another chat.
+
+Private chats keep the generic `/` address: private IDs, titles, and context never enter URL or browser history state. Private conversations remain temporary and cannot be reopened from a link.
+
 ## Private chats
 
 **Private chat** opens a temporary conversation in the selected folder. It receives the same global and immediate-folder AGENTS.md instructions as a normal chat. A distinct sidebar label and banner identify it. Use **Close private chat** to discard it; switching to another chat keeps it available in the same tab. Click a selected private chat again to rename it in memory. Private chats cannot be archived or converted to saved chats.

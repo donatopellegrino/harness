@@ -1,3 +1,4 @@
+import { createChatNavigation, chatIdFromPath } from '/chat-navigation.js';
 import { createPrivateChats } from '/private-chats.js';
 import { readableMessageMetadata } from '/readable-metadata.js';
 import { accountSynchronizer } from '/account-sync.js';
@@ -38,18 +39,19 @@ function replaceChat(chat) {
   const index = chats.findIndex(item => item.id === chat.id);
   if (index < 0) chats.unshift(chat); else chats[index] = mergeChat(chats[index], chat);
 }
-let archivedView = false;
-function selectFirstChat() {
+let archivedView = false, initialNavigation = true;
+function selectFirstChat({ replace = true } = {}) {
   const chat = visibleChats(chats, archivedView)[0];
   activeId = chat?.id;
   folderSidebar.selectChat(activeId, chat?.folderId);
   if (chat?.folderId) folderSidebar.revealFolder(chat.folderId);
   $('prompt').value = '';
+  navigation.write(chat, { replace });
 }
 const folderSidebar = createFolders({ state: () => ({ folders, chats, activeId, archivedView, locked: busy || savingSettings, activities: displayedActivities() }), api,
   onOrganization: update => { const index = chats.findIndex(chat => chat.id === update.id); if (index >= 0) chats[index] = mergeOrganization(chats[index], update); },
   onFolder: folder => { const index = folders.findIndex(item => item.id === folder.id); if (index < 0) folders.push(folder); else folders[index] = folder; },
-  onSelectChat: id => { if (id === activeId) { renderChats(); controls(); return true; } if (busy || savingSettings) return false; activeId = id; $('prompt').value = ''; render(); return true; },
+  onSelectChat: id => { if (id === activeId) { renderChats(); controls(); return true; } if (busy || savingSettings) return false; activeId = id; $('prompt').value = ''; showError(''); navigation.write(active()); render(); return true; },
   onLifecycle: ({ id, removed }) => {
     if (removed) { chats = chats.filter(chat => chat.id !== id); activities.delete(id); }
     if (!visibleChats(chats, archivedView).some(chat => chat.id === activeId)) selectFirstChat();
@@ -66,7 +68,30 @@ $('global-agents').onclick = () => agentsEditor.open();
 const messageInfo = createMessageInfo({ load: (chatId, index) => api(`/api/chats/${chatId}/messages/${index}/metadata`) });
 const messageScroll = createScrollFollow($('messages'));
 $('messages').addEventListener('scroll', () => messageInfo.close());
+const navigation = createChatNavigation({ location: window.location, history: window.history,
+  findChat: id => chats.find(chat => chat.id === id), isLocked: () => busy || savingSettings,
+  onSelect: chat => {
+    showError('');
+    if (!chat) { archivedView = false; selectFirstChat(); }
+    else {
+      archivedView = chat.archived === true; activeId = chat.id;
+      folderSidebar.selectChat(chat.id, chat.folderId); folderSidebar.revealFolder(chat.folderId);
+      $('prompt').value = '';
+    }
+    render();
+  },
+  onMissing: () => {
+    activeId = undefined; archivedView = false; folderSidebar.selectChat(undefined);
+    $('prompt').value = ''; render(); showError('This chat was deleted or is not available.');
+  },
+});
+window.addEventListener('popstate', () => {
+  const locked = busy || savingSettings;
+  navigation.openLocation();
+  if (locked) showStatus('The linked chat will open when the current request finishes.');
+});
 function controls() {
+  if (navigation.flush()) return;
   if (lastBusy !== busy) { activityEpoch++; if (!busy && activeId) activities.delete(activeId); lastBusy = busy; }
   resizeComposer($('prompt'));
   folderSidebar.updateActivity();
@@ -211,13 +236,18 @@ async function refresh() {
   $('login').textContent = account.connected ? 'Enable ChatGPT plan usage' : 'Continue with ChatGPT';
   $('logout').hidden = !account.connected;
   models = [];
-  if (!visibleChats(chats, archivedView).some(chat => chat.id === activeId)) selectFirstChat();
+  if (initialNavigation) { initialNavigation = false; navigation.openLocation(); }
+  else if (!visibleChats(chats, archivedView).some(chat => chat.id === activeId)) {
+    if (chatIdFromPath(window.location.pathname)) navigation.openLocation();
+    else selectFirstChat();
+  }
   render();
   if (account.sharing) { models = (await api('/api/models')).models; render(); }
 }
 async function newChat({ preserveDraft = false, privateMode = false } = {}) {
   const folderId = archivedView ? null : folderSidebar.selectedFolder();
   const chat = privateMode ? privateChats.create(folderId) : await api('/api/chats', 'POST', { folderId }); archivedView = false; replaceChat(chat); activeId = chat.id; folderSidebar.selectChat(chat.id, chat.folderId); folderSidebar.revealFolder(chat.folderId);
+  navigation.write(chat);
   if (!preserveDraft) $('prompt').value = '';
   render(); $('prompt').focus();
 }
@@ -246,7 +276,7 @@ $('close-private-chat').onclick = () => {
 $('new-chat').onclick = safely(newChat);
 $('archive-view').onclick = safely(() => {
   if (busy || savingSettings) return;
-  archivedView = !archivedView; selectFirstChat(); render();
+  archivedView = !archivedView; selectFirstChat({ replace: false }); render();
 });
 $('model').onchange = safely(async () => {
   const custom = $('model').value === CUSTOM_MODEL;
@@ -439,10 +469,13 @@ $('composer').onsubmit = safely(async event => {
 $('prompt').addEventListener('keydown', event => {
   if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); if (!$('send').disabled) $('composer').requestSubmit(); }
 });
-await safely(refresh)();
 const login = new URLSearchParams(window.location.search).get('login');
+await safely(refresh)();
 if (login && login !== 'success') showError(login);
-if (login) history.replaceState(null, '', '/');
+if (login) {
+  const url = new URL(window.location.href); url.searchParams.delete('login');
+  history.replaceState(null, '', url.pathname + url.search + url.hash);
+}
 
 const syncAccount = accountSynchronizer({
   readStatus: () => api('/api/account'),

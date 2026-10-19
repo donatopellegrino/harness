@@ -24,6 +24,7 @@ const assets = new Map([
   ['/folders.js', ['folders.js', 'text/javascript']],
   ['/agents-md.js', ['agents-md.js', 'text/javascript']],
   ['/private-chats.js', ['private-chats.js', 'text/javascript']],
+  ['/chat-navigation.js', ['chat-navigation.js', 'text/javascript']],
   ['/readable-metadata.js', ['../lib/message-metadata.mjs', 'text/javascript']],
   ['/message-info.js', ['message-info.js', 'text/javascript']],
   ['/theme.js', ['theme.js', 'text/javascript']],
@@ -103,9 +104,10 @@ export async function createHarness({ port = 0, directory = join(root, '.data'),
         response.writeHead(303, { Location: `/?login=${encodeURIComponent(result)}` });
         return response.end();
       }
-      if (assets.has(url.pathname) && request.method === 'GET') {
-        const [name, type] = assets.get(url.pathname);
-        if (url.pathname === '/') response.setHeader('Set-Cookie', `${cookie}; HttpOnly; SameSite=Strict; Path=/`);
+      const chatPage = /^\/chats\/[\w-]+$/.test(url.pathname);
+      if ((assets.has(url.pathname) || chatPage) && request.method === 'GET') {
+        const [name, type] = assets.get(chatPage ? '/' : url.pathname);
+        if (url.pathname === '/' || chatPage) response.setHeader('Set-Cookie', `${cookie}; HttpOnly; SameSite=Strict; Path=/`);
         response.writeHead(200, { 'Content-Type': `${type}; charset=utf-8` });
         return response.end(readFileSync(join(root, 'public', name)));
       }

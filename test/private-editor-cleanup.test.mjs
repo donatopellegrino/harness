@@ -26,8 +26,8 @@ function fixture(t, privateMode = true) {
     onOrganization() {}, onFolder() {}, onSelectChat() {}, onLifecycle() {}, onAgents() {}, afterRender() {},
   });
   sidebar.selectChat(chat.id, null); sidebar.render();
-  const find = root => root.tag === 'button' && root.textContent.includes(chat.title) ? root : root.children.map(find).find(Boolean);
-  find(node('chats')).onclick();
+  const find = root => ['button', 'a'].includes(root.tag) && root.textContent.includes(chat.title) ? root : root.children.map(find).find(Boolean);
+  find(node('chats')).onclick({ button: 0, preventDefault() {} });
   assert.equal(node('organize-dialog').open, true); assert.equal(node('organize-name').value, chat.title);
   return { sidebar, node, requests };
 }

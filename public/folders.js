@@ -1,4 +1,5 @@
 import { folderActivityCounts } from './activity.js';
+import { chatPath } from './chat-navigation.js';
 
 export const visibleChats = (chats, archived = false) => chats.filter(chat => (chat.archived === true) === archived);
 
@@ -177,13 +178,21 @@ export function createFolders({ state, api, onOrganization, onFolder, onSelectCh
       }
       for (const chat of chats.filter(item => archivedView || (item.folderId ?? null) === parentId)) {
         const row = document.createElement('div'); row.className = 'sidebar-row';
-        const open = button(chat.private ? `◌ ${chat.title}` : chat.title, 'chat-open', () => {
+        const select = () => {
           if (selection?.kind === 'chat' && selection.id === chat.id) { edit('chat', chat); return; }
           selected = chat.folderId ?? null; selection = { kind: 'chat', id: chat.id };
           // Selecting an item for editing must also work while the active
           // conversation is locked. Keep that conversation and its draft intact.
           if (onSelectChat(chat.id) === false) { render(); afterRender(); }
-        });
+        };
+        const open = chat.private ? button(`◌ ${chat.title}`, 'chat-open', select) : document.createElement('a');
+        if (!chat.private) {
+          open.textContent = chat.title; open.className = 'chat-open'; open.href = chatPath(chat);
+          open.onclick = event => {
+            if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+            event.preventDefault(); select();
+          };
+        }
         open.dataset.chatOpen = ''; open.dataset.chatId = chat.id; open.title = chat.private ? 'Temporary chat · Only in this tab · Not saved to the database' : `${chat.title} · Click again to edit, ${chat.archived ? 'restore' : 'archive'}, or delete`; open.setAttribute('aria-current', String(selection?.kind === 'chat' && chat.id === selection.id));
         row.append(open, indicator('chat', chat.id)); container.append(row);
       }

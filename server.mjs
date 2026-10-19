@@ -14,6 +14,7 @@ import { agentsInstructions } from './lib/agents-md.mjs';
 
 const root = dirname(fileURLToPath(import.meta.url));
 const assets = new Map([
+  ['/favicon.svg', ['favicon.svg', 'image/svg+xml']],
   ['/', ['index.html', 'text/html']], ['/app.js', ['app.js', 'text/javascript']], ['/style.css', ['style.css', 'text/css']],
   ['/account-sync.js', ['account-sync.js', 'text/javascript']],
   ['/compaction-sync.js', ['compaction-sync.js', 'text/javascript']],

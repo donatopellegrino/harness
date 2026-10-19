@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <title>Harness</title>
+  <rect width="64" height="64" rx="14" fill="#984722"/>
+  <path fill="#fffaf4" d="M14 11h14v22c3-5 7-8 12-8 8 0 12 5 12 13v12h5v4H37v-4h5V38c0-5-2-8-6-8-5 0-8 5-8 12v8h5v4H14v-4h5V15h-5z"/>
+</svg>

@@ -16,7 +16,9 @@ export function createPrivateChats({ metadata, fetcher = fetch, uuid = () => Arr
     const old = chats.get(view.id);
     if (!old) throw new Error('This private chat is closed.');
     const { privateState, ...summary } = view;
-    const chat = { ...old, ...summary, ...privateState };
+    const organization = (old.organizationVersion ?? 0) > (summary.organizationVersion ?? 0)
+      ? { title: old.title, titleEdited: old.titleEdited, organizationVersion: old.organizationVersion } : {};
+    const chat = { ...old, ...summary, ...privateState, ...organization };
     // Old metadata is kept only here; it is never sent back with the snapshot.
     chat.messages = chat.messages.map((message, index) => ({ ...message,
       metadata: message.metadata ?? old.messages[index]?.metadata }));

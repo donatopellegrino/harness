@@ -167,3 +167,13 @@ test('private chat creation works on plain HTTP where crypto.randomUUID is unava
   const chat = createPrivateChats().create();
   assert.match(chat.id, /^private-[0-9a-f]{32}$/);
 });
+
+test('a delayed private reply cannot undo a rename made while it was running', async () => {
+  const f = createPrivateChats({ uuid: () => 'fixture' }), chat = f.create();
+  await f.api(`/api/chats/${chat.id}/organization`, 'PATCH', { title: 'New private name' });
+  const completed = f.accept({ ...chat, organizationVersion: 0, privateState: {
+    input: [{ role: 'user', content: secret }], messages: [{ role: 'assistant', text: 'Reply' }], compactions: [],
+  } });
+  assert.equal(completed.title, 'New private name'); assert.equal(completed.organizationVersion, 1);
+  assert.equal(f.list()[0].title, 'New private name'); assert.equal(completed.messages.length, 1);
+});
